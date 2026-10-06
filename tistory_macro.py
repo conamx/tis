@@ -1,11 +1,16 @@
 """
 티스토리 자동 발행 매크로
 
-흐름: 키워드 입력 → 네이버 블로그 검색 → 참고글 선택 → Gemini 원고 생성
+흐름: 키워드 입력 → 네이버 블로그 검색 → 참고글 선택 → AI 원고 생성 (Claude Code 또는 Gemini)
       → 참고글과 유사도 검사(높으면 재작성) → 카드 이미지 생성/업로드
       → 티스토리 에디터에 글 주입 → 사용자가 직접 발행
 
 API 키 등 설정은 config.json 에 저장됩니다 (앱의 [⚙ 설정] 버튼에서 수정).
+
+원고 작성 AI
+  - claude_cli (기본): PC에 설치·로그인된 Claude Code 를 `claude -p` 로 호출.
+                       Claude 구독 사용량으로 처리되므로 API 비용 없음 (하루 몇 개 수준 용도)
+  - gemini           : Gemini API 키 사용
 """
 import warnings
 warnings.filterwarnings("ignore")
@@ -18,8 +23,10 @@ import os
 import queue
 import random
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import time
@@ -71,6 +78,10 @@ DEFAULT_CONFIG = {
     "gemini_api_key": "",
     "imgbb_api_key": "",
     "gemini_models": ["gemini-2.5-flash", "gemini-2.5-flash-lite"],
+    "ai_provider": "claude_cli",      # "claude_cli" 또는 "gemini"
+    "claude_model": "",               # 비우면 Claude Code 기본 모델, 예: sonnet / opus
+    "claude_cli_path": "",            # 비우면 자동 탐색
+    "fallback_to_gemini": True,       # Claude Code 실패 시 Gemini 키가 있으면 Gemini 로 재시도
     "chrome_version_main": None,      # None = 설치된 크롬 버전 자동 감지
     "tistory_write_path": "/manage/post",
     "search_count": 5,                # 네이버 검색 결과 개수
@@ -91,7 +102,7 @@ ENV_OVERRIDES = {
     "imgbb_api_key": "IMGBB_API_KEY",
 }
 
-REQUIRED_KEYS = {
+KEY_LABELS = {
     "naver_client_id": "네이버 Client ID",
     "naver_client_secret": "네이버 Client Secret",
     "gemini_api_key": "Gemini API 키",
@@ -119,7 +130,10 @@ def save_config(cfg):
 
 
 def missing_keys(cfg):
-    return [label for key, label in REQUIRED_KEYS.items() if not str(cfg.get(key, "")).strip()]
+    required = ["naver_client_id", "naver_client_secret", "imgbb_api_key"]
+    if cfg.get("ai_provider") == "gemini":
+        required.append("gemini_api_key")
+    return [KEY_LABELS[k] for k in required if not str(cfg.get(k, "")).strip()]
 
 
 CONFIG = load_config()
@@ -325,10 +339,110 @@ def find_banned(text):
 
 
 # ==========================================
-# [Gemini]
+# [AI 원고 작성] — Claude Code CLI / Gemini API
 # ==========================================
-class GeminiError(Exception):
+class AIError(Exception):
     pass
+
+
+def find_claude_cli():
+    """설치된 Claude Code 실행 파일 경로 (없으면 None)"""
+    custom = (CONFIG.get("claude_cli_path") or "").strip()
+    if custom:
+        return custom if os.path.exists(custom) else None
+    found = shutil.which("claude")
+    if found:
+        return found
+    home = os.path.expanduser("~")
+    for p in [os.path.join(home, ".local", "bin", "claude.exe"),
+              os.path.join(home, ".local", "bin", "claude"),
+              os.path.join(os.environ.get("APPDATA", ""), "npm", "claude.cmd"),
+              os.path.join(home, ".claude", "local", "claude")]:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def call_claude_cli(prompt, log=print, stop_flag=None, timeout=900):
+    """
+    `claude -p` 로 원고 생성. 프롬프트는 stdin 으로 전달(명령줄 길이 제한 회피).
+    --tools "" : 파일 읽기/명령 실행 없이 글만 쓰게 함
+    """
+    exe = find_claude_cli()
+    if not exe:
+        raise AIError("Claude Code 를 찾지 못했습니다. 설치 후 터미널에서 `claude` 를 한 번 실행해 "
+                      "로그인하거나, ⚙ 설정에 실행 파일 경로를 넣어주세요.")
+    cmd = [exe, "-p", "--output-format", "json", "--tools", "", "--no-session-persistence"]
+    model = (CONFIG.get("claude_model") or "").strip()
+    if model:
+        cmd += ["--model", model]
+
+    env = os.environ.copy()
+    # API 키가 환경변수에 있으면 구독 대신 API 로 과금되므로 제거
+    env.pop("ANTHROPIC_API_KEY", None)
+    env.pop("ANTHROPIC_AUTH_TOKEN", None)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # 윈도우에서 검은 창 안 뜨게
+
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                            errors="replace", cwd=tempfile.gettempdir(), env=env,
+                            creationflags=flags)
+    started = time.time()
+    pending_input = prompt
+    while True:
+        try:
+            out, err = proc.communicate(input=pending_input, timeout=2)
+            break
+        except subprocess.TimeoutExpired:
+            pending_input = None  # stdin 은 첫 호출에서 이미 전달됨
+            if stop_flag and stop_flag.is_set():
+                proc.kill()
+                proc.communicate()
+                raise AIError("사용자 중지")
+            if time.time() - started > timeout:
+                proc.kill()
+                proc.communicate()
+                raise AIError(f"Claude Code 응답 시간 초과 ({timeout // 60}분)")
+
+    try:
+        data = json.loads(out)
+    except (json.JSONDecodeError, TypeError):
+        msg = (err or out or "").strip()[:300]
+        raise AIError(f"Claude Code 실행 실패 (코드 {proc.returncode}): {msg or '출력 없음'}")
+
+    result = data.get("result") or ""
+    if data.get("is_error") or data.get("subtype") != "success" or not result.strip():
+        hint = ""
+        low = result.lower()
+        if "login" in low or "auth" in low:
+            hint = " → 터미널에서 `claude` 실행 후 /login 으로 로그인하세요"
+        elif "limit" in low:
+            hint = " → 구독 사용량 한도에 걸렸습니다. 나중에 다시 시도하세요"
+        raise AIError(f"Claude Code 오류: {result[:200] or data.get('subtype')}{hint}")
+    return result
+
+
+def call_ai(prompt, log=print, stop_flag=None):
+    """설정된 AI 로 원고 생성. Claude Code 실패 시 Gemini 키가 있으면 Gemini 로 재시도"""
+    if CONFIG.get("ai_provider", "claude_cli") == "gemini":
+        return call_gemini(prompt, log, stop_flag)
+    try:
+        return call_claude_cli(prompt, log, stop_flag)
+    except AIError as e:
+        if str(e) == "사용자 중지":
+            raise
+        if CONFIG.get("fallback_to_gemini", True) and CONFIG.get("gemini_api_key", "").strip():
+            log(f"  ⚠️ {e}", "warning")
+            log("  ↪ Gemini 로 재시도합니다", "warning")
+            return call_gemini(prompt, log, stop_flag)
+        raise
+
+
+def ai_label():
+    if CONFIG.get("ai_provider", "claude_cli") == "gemini":
+        return "Gemini"
+    model = CONFIG.get("claude_model")
+    return f"Claude Code ({model})" if model else "Claude Code"
 
 
 def call_gemini(prompt, log=print, stop_flag=None):
@@ -338,7 +452,7 @@ def call_gemini(prompt, log=print, stop_flag=None):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         for attempt in range(3):
             if stop_flag and stop_flag.is_set():
-                raise GeminiError("사용자 중지")
+                raise AIError("사용자 중지")
             try:
                 res = requests.post(
                     url,
@@ -373,7 +487,7 @@ def call_gemini(prompt, log=print, stop_flag=None):
                 continue
             log(f"  {last_err}", "warning")
             break  # 400/403/404 등은 재시도 의미 없음
-    raise GeminiError(last_err)
+    raise AIError(last_err)
 
 
 def clean_model_output(text):
@@ -1260,11 +1374,11 @@ class MacroApp:
             self.log(f"⚠️ [{kw}] 참고할 본문이 없어 건너뜀", "warning")
             return None
 
-        self.log("🤖 Gemini 원고 생성 중...", "info")
+        self.log(f"🤖 {ai_label()} 원고 생성 중... (1~3분 걸릴 수 있어요)", "info")
         try:
-            raw = clean_model_output(call_gemini(build_prompt(kw, source_text, style),
+            raw = clean_model_output(call_ai(build_prompt(kw, source_text, style),
                                                  self.log, self.stop_flag))
-        except GeminiError as e:
+        except AIError as e:
             self.log(f"❌ [{kw}] 생성 실패: {e}", "error")
             return None
 
@@ -1287,9 +1401,9 @@ class MacroApp:
             self._check_stop()
             self.log(f"  ✍️ 원고 재작성 중... ({attempt + 1}/{retries})", "info")
             try:
-                raw = clean_model_output(call_gemini(build_rewrite_prompt(kw, raw, copied, banned),
+                raw = clean_model_output(call_ai(build_rewrite_prompt(kw, raw, copied, banned),
                                                      self.log, self.stop_flag))
-            except GeminiError as e:
+            except AIError as e:
                 self.log(f"  ⚠️ 재작성 실패, 이전 원고 사용: {e}", "warning")
                 break
 
@@ -1446,11 +1560,11 @@ class MacroApp:
         win = tk.Toplevel(self.root, bg=BG, padx=20, pady=16)
         self._settings_win = win
         win.title("설정")
-        win.geometry("520x640")
+        win.geometry("540x820")
         win.transient(self.root)
 
         if first_run:
-            tk.Label(win, text="처음 실행입니다. API 키를 입력하고 저장해주세요.",
+            tk.Label(win, text="처음 실행입니다. 키를 입력하고 저장해주세요.",
                      font=(FONT, 9, "bold"), bg=BG, fg=WARNING).pack(anchor="w", pady=(0, 8))
 
         entries = {}
@@ -1463,12 +1577,51 @@ class MacroApp:
             e.pack(fill="x", ipady=4)
             entries[key] = e
 
-        field("네이버 Client ID", "naver_client_id")
-        field("네이버 Client Secret", "naver_client_secret", secret=True)
-        field("Gemini API 키", "gemini_api_key", secret=True)
-        field("imgbb API 키", "imgbb_api_key", secret=True)
+        # ── 원고 작성 AI ──
+        tk.Label(win, text="원고 작성 AI", font=(FONT, 9, "bold"), bg=BG, fg=TEXT).pack(anchor="w")
+        provider_var = tk.StringVar(value=CONFIG.get("ai_provider", "claude_cli"))
+        prow = tk.Frame(win, bg=BG)
+        prow.pack(fill="x")
+        for val, text in [("claude_cli", "Claude Code (구독, API 비용 없음)"), ("gemini", "Gemini API")]:
+            tk.Radiobutton(prow, text=text, variable=provider_var, value=val, font=(FONT, 9),
+                           bg=BG, fg=TEXT, selectcolor=BG3, activebackground=BG,
+                           activeforeground=TEXT).pack(side="left", padx=(0, 10))
+        field("Claude 모델 (비우면 기본값, 예: sonnet / opus)", "claude_model")
+        field("Claude Code 실행 파일 경로 (비우면 자동 찾기)", "claude_cli_path")
+        test_row = tk.Frame(win, bg=BG)
+        test_row.pack(fill="x", pady=(6, 0))
+        test_label = tk.Label(test_row, text="", font=(FONT, 8), bg=BG, fg=TEXT_DIM,
+                              wraplength=330, justify="left")
+
+        def test_claude():
+            # 저장 전 입력값으로 테스트
+            CONFIG["claude_model"] = entries["claude_model"].get().strip()
+            CONFIG["claude_cli_path"] = entries["claude_cli_path"].get().strip()
+            test_label.configure(text="테스트 중... (10초 정도)", fg=TEXT_DIM)
+
+            def work():
+                try:
+                    r = call_claude_cli("'연결 성공'이라고만 답해주세요.", timeout=120)
+                    self.ui(lambda: test_label.winfo_exists() and
+                            test_label.configure(text=f"✅ 연결됨: {r.strip()[:30]}", fg=SUCCESS))
+                except Exception as e:
+                    msg = str(e)
+                    self.ui(lambda: test_label.winfo_exists() and
+                            test_label.configure(text=f"❌ {msg}", fg=ERROR))
+            threading.Thread(target=work, daemon=True).start()
+
+        self._btn(test_row, "Claude 연결 테스트", test_claude, bg=BG3, fg=TEXT, size=8,
+                  bold=False, pady=4).pack(side="left", ipadx=8)
+        test_label.pack(side="left", padx=8)
+
+        field("Gemini API 키 (Gemini 사용 시 또는 Claude 실패 시 백업)", "gemini_api_key", secret=True)
         field("Gemini 모델 (쉼표로 구분, 앞에서부터 시도)", "gemini_models",
               value=", ".join(CONFIG.get("gemini_models", [])))
+
+        tk.Frame(win, bg=BORDER, height=1).pack(fill="x", pady=(12, 4))
+        field("네이버 Client ID", "naver_client_id")
+        field("네이버 Client Secret", "naver_client_secret", secret=True)
+        field("imgbb API 키", "imgbb_api_key", secret=True)
         field("크롬 메인 버전 (비우면 자동 감지, 오류 날 때만 예: 145)", "chrome_version_main",
               value=CONFIG.get("chrome_version_main") or "")
         field("참고글 겹침 허용치 (0~1, 낮을수록 원고를 더 많이 바꿈)", "max_similarity")
@@ -1485,8 +1638,11 @@ class MacroApp:
                 entries[k].configure(show="" if entries[k].cget("show") else "•")
 
         def save():
-            for k in REQUIRED_KEYS:
+            for k in KEY_LABELS:
                 CONFIG[k] = entries[k].get().strip()
+            CONFIG["ai_provider"] = provider_var.get()
+            CONFIG["claude_model"] = entries["claude_model"].get().strip()
+            CONFIG["claude_cli_path"] = entries["claude_cli_path"].get().strip()
             CONFIG["gemini_models"] = [m.strip() for m in entries["gemini_models"].get().split(",")
                                        if m.strip()] or DEFAULT_CONFIG["gemini_models"]
             ver = entries["chrome_version_main"].get().strip()

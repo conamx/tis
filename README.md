@@ -1,6 +1,6 @@
 # 티스토리 자동 발행 매크로
 
-키워드 입력 → 네이버 블로그 참고글 선택 → Gemini 원고 생성 → 참고글 유사도 검사/재작성
+키워드 입력 → 네이버 블로그 참고글 선택 → AI 원고 생성 (Claude Code 구독 또는 Gemini) → 참고글 유사도 검사/재작성
 → 카드 이미지 생성·업로드 → 티스토리 에디터 자동 주입 (발행 버튼은 직접 누름)
 
 ## 설치
@@ -18,10 +18,24 @@ python tistory_macro.py
 | `NanumSquareNeo-cBd/dEb/eHv.ttf` | 카드 글꼴 | 맑은 고딕 (Windows) |
 | `icon.png`, `icon.ico` | 창 아이콘 | 기본 아이콘 |
 
+## 원고 작성 AI: Claude Code (기본, API 비용 없음)
+
+PC에 설치된 Claude Code를 `claude -p`로 불러서 원고를 씁니다. **Claude 구독 사용량으로 처리**되므로
+API 키나 별도 결제가 필요 없습니다. 하루 몇 개 정도 쓰는 용도에 맞습니다.
+
+1. Claude Code 설치 (Windows PowerShell): `irm https://claude.ai/install.ps1 | iex`
+2. 터미널에서 `claude` 를 한 번 실행해 **Claude 계정(구독)으로 로그인**
+3. 앱의 **⚙ 설정 → Claude 연결 테스트**로 확인
+
+- 글 하나에 1~3분 걸립니다 (재작성까지 하면 더 걸림).
+- 구독 사용량 한도에 걸리면 로그에 안내가 나옵니다. **Gemini 키를 넣어두면 그때 자동으로 Gemini로 대신 씁니다.**
+- 환경변수에 `ANTHROPIC_API_KEY`가 있으면 API로 과금될 수 있어서, 매크로가 실행할 때 자동으로 빼고 실행합니다.
+- 모델은 설정에서 `sonnet` / `opus` 지정 가능 (비우면 Claude Code 기본값). opus는 사용량을 더 많이 씁니다.
+
 ## 처음 실행
 
-1. 앱이 뜨면 **설정 창**이 자동으로 열립니다. API 키 4개를 넣고 저장하세요.
-   (`config.json`에 저장되며 git에는 올라가지 않습니다)
+1. 앱이 뜨면 **설정 창**이 자동으로 열립니다. 네이버 키 2개와 imgbb 키를 넣고 저장하세요.
+   (Gemini 키는 Gemini를 쓰거나 백업용으로만 필요. 모두 `config.json`에 저장되며 git에는 올라가지 않습니다)
 2. 티스토리 계정은 설정 창에서 한 줄에 `이름 URL` 형식으로 추가/삭제합니다.
 
 ## 사용법
@@ -46,6 +60,9 @@ python tistory_macro.py
 
 | 키 | 기본값 | 설명 |
 |---|---|---|
+| `ai_provider` | `"claude_cli"` | `"claude_cli"` 또는 `"gemini"` |
+| `claude_model` | `""` | 비우면 기본, `sonnet` / `opus` |
+| `fallback_to_gemini` | `true` | Claude 실패 시 Gemini 키가 있으면 Gemini로 재시도 |
 | `gemini_models` | `["gemini-2.5-flash", "gemini-2.5-flash-lite"]` | 앞에서부터 시도 |
 | `chrome_version_main` | `null` | 크롬 버전 오류가 날 때만 숫자로 지정 |
 | `max_similarity` | `0.12` | 참고글 겹침 허용치 |

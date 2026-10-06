@@ -12,6 +12,10 @@
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite"
   ],
+  "ai_provider": "claude_cli",
+  "claude_model": "",
+  "claude_cli_path": "",
+  "fallback_to_gemini": true,
   "chrome_version_main": null,
   "tistory_write_path": "/manage/post",
   "search_count": 5,
