@@ -1,0 +1,25 @@
+{
+  "accounts": {
+    "dndhkdusdl": "https://dndhkdusdl.tistory.com",
+    "infopicktolife": "https://infopicktolife.tistory.com"
+  },
+  "last_account": "dndhkdusdl",
+  "naver_client_id": "",
+  "naver_client_secret": "",
+  "gemini_api_key": "",
+  "imgbb_api_key": "",
+  "gemini_models": [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite"
+  ],
+  "chrome_version_main": null,
+  "tistory_write_path": "/manage/post",
+  "search_count": 5,
+  "manual_select": true,
+  "auto_pick_count": 3,
+  "max_source_chars": 20000,
+  "min_body_chars": 2500,
+  "max_similarity": 0.12,
+  "rewrite_retries": 2,
+  "wait_timeout_min": 30
+}

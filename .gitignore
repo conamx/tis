@@ -1,0 +1,9 @@
+# API 키가 들어있으므로 절대 커밋하지 않음
+config.json
+output/
+logs/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
