@@ -14,7 +14,7 @@ python tistory_macro.py
 
 | 파일 | 용도 | 없으면 |
 |---|---|---|
-| `template.png`, `template_2.png` | 카드 이미지 배경 | 흰 배경 |
+| `template.png`, `template_2.png` | 카드 이미지 배경 (포함됨) | 흰 배경 |
 | `NanumSquareNeo-cBd/dEb/eHv.ttf` | 카드 글꼴 | 맑은 고딕 (Windows) |
 | `icon.png`, `icon.ico` | 창 아이콘 | 기본 아이콘 |
 
@@ -73,13 +73,14 @@ API 키나 별도 결제가 필요 없습니다. 하루 몇 개 정도 쓰는 �
 
 API 키는 환경변수 `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET`, `GEMINI_API_KEY`, `IMGBB_API_KEY`로도 넣을 수 있습니다.
 
-## exe 빌드 (선택)
+## exe 빌드
 
-```bash
-pyinstaller --onefile --noconsole --icon icon.ico ^
-  --add-data "template.png;." --add-data "template_2.png;." ^
-  --add-data "NanumSquareNeo-cBd.ttf;." --add-data "NanumSquareNeo-dEb.ttf;." ^
-  --add-data "NanumSquareNeo-eHv.ttf;." --add-data "icon.png;." tistory_macro.py
-```
+윈도우에서 **`build.bat` 더블클릭** → `dist\TistoryMacro.exe` 생성.
+템플릿 2개, 폰트 3개, 아이콘이 exe 안에 같이 묶입니다.
 
 `config.json`, `output/`, `logs/`는 exe와 같은 폴더에 생깁니다.
+
+## 이미지 저장 위치
+
+- **블로그에 들어가는 이미지:** imgbb에 업로드된 주소(`https://i.ibb.co/...`)로 본문에 삽입 (만료 설정 없음)
+- **내 PC 사본:** `output/날짜_계정/images/글번호_이미지번호.jpg` (원고 HTML과 같은 폴더, 앱의 📁 결과 폴더 버튼)

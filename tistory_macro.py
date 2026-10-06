@@ -631,6 +631,8 @@ def ensure_img_placeholders(body):
 # ==========================================
 FONT_FILES = ["NanumSquareNeo-cBd.ttf", "NanumSquareNeo-dEb.ttf", "NanumSquareNeo-eHv.ttf"]
 TEMPLATE_FILES = ["template.png", "template_2.png"]
+# 템플릿별 글자 세로 중심 (1280x720 기준) — 흰 영역 가운데에 오도록. 목록에 없으면 360
+TEMPLATE_TEXT_CENTER = {"template.png": 300, "template_2.png": 320}
 FALLBACK_FONTS = ["C:/Windows/Fonts/malgunbd.ttf", "C:/Windows/Fonts/malgun.ttf",
                   "/System/Library/Fonts/AppleSDGothicNeo.ttc"]
 
@@ -649,9 +651,12 @@ def _load_font(size):
 def create_card(text, save_path):
     """카드 이미지를 만들어 save_path 에 저장. returns 경고 메시지 목록"""
     warns = []
-    templates = [get_resource_path(f) for f in TEMPLATE_FILES if os.path.exists(get_resource_path(f))]
+    templates = [f for f in TEMPLATE_FILES if os.path.exists(get_resource_path(f))]
+    center_y = 360
     if templates:
-        img = Image.open(random.choice(templates)).convert("RGB").resize((1280, 720), Image.LANCZOS)
+        name = random.choice(templates)
+        center_y = TEMPLATE_TEXT_CENTER.get(name, 360)
+        img = Image.open(get_resource_path(name)).convert("RGB").resize((1280, 720), Image.LANCZOS)
     else:
         img = Image.new("RGB", (1280, 720), color="white")
         warns.append("템플릿 이미지 없음 → 흰 배경 사용")
@@ -679,7 +684,7 @@ def create_card(text, save_path):
     c = random.randint(0, 15)
     lines = textwrap.wrap(strip_tags(text).strip(), width=12)[:4]
     line_h = font_size + 20
-    y = (720 - line_h * len(lines)) / 2 + random.randint(-20, 20)
+    y = center_y - line_h * len(lines) / 2 + random.randint(-15, 15)
     for line in lines:
         bbox = draw.textbbox((0, 0), line, font=font)
         x = (1280 - (bbox[2] - bbox[0])) / 2 + random.randint(-5, 5)
