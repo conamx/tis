@@ -1,9 +1,15 @@
 """
 티스토리 자동 발행 매크로
 
-흐름: 키워드 입력 → 네이버 블로그 검색 → 참고글 선택 → AI 원고 생성 (Claude Code 또는 Gemini)
-      → 참고글과 유사도 검사(높으면 재작성) → 카드 이미지 생성/업로드
+흐름: 키워드 입력 → 네이버 블로그 검색 → 참고글 선택 (+ 쿠팡 상품 선택/붙여넣기)
+      → AI 원고 생성 (Claude Code 또는 Gemini) → 참고글과 유사도 검사(높으면 재작성)
+      → 카드 이미지 생성/업로드 → 쿠팡 상품 카드·파트너스 고지 삽입
       → 티스토리 에디터에 글 주입 → 사용자가 직접 발행
+
+쿠팡 상품 연동 (선택): ⚙ 설정에 셰어인포 사이트 주소 + 관리자 비밀번호를 넣으면
+  - 키워드와 관련된 사이트 등록 상품을 선택 화면에 보여주고, 체크한 상품을 글에 카드로 넣음
+  - 새 상품을 붙여넣으면(파트너스 HTML / '링크 ⇥ 상품명 ⇥ 가격 ⇥ 이미지주소') 사이트에도 자동 등록
+    → 티스토리 글과 사이트 가격추적 페이지를 한 번에 준비
 
 API 키 등 설정은 config.json 에 저장됩니다 (앱의 [⚙ 설정] 버튼에서 수정).
 
@@ -92,6 +98,14 @@ DEFAULT_CONFIG = {
     "max_similarity": 0.12,           # 참고글과 겹치는 비율 상한 (0~1)
     "rewrite_retries": 2,             # 유사도 초과 시 재작성 횟수
     "wait_timeout_min": 30,           # 로그인/발행 대기 시간(분), 0 = 무제한
+    # ── 셰어인포 사이트 · 쿠팡 상품 연동 (비우면 사용 안 함) ──
+    "site_url": "",                   # 관리자 API 를 호출할 사이트 주소, 예: https://cococoupa.netlify.app
+    "site_public_url": "",            # 글에 넣을 사이트 링크 주소 (비우면 site_url)
+    "site_admin_key": "",             # 사이트 ADMIN_PASSWORD
+    "product_match_count": 6,         # 선택 화면에 보여줄 관련 상품 수
+    "auto_product_count": 3,          # 기본으로 체크(자동 선택 모드에선 자동 사용)할 상품 수
+    "card_site_link": True,           # 상품 카드에 '가격 변동 그래프 보기'(사이트 링크) 버튼 넣기
+    "coupang_disclosure": "이 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다.",
 }
 
 # 환경변수가 있으면 config.json 보다 우선
@@ -100,6 +114,7 @@ ENV_OVERRIDES = {
     "naver_client_secret": "NAVER_CLIENT_SECRET",
     "gemini_api_key": "GEMINI_API_KEY",
     "imgbb_api_key": "IMGBB_API_KEY",
+    "site_admin_key": "SITE_ADMIN_KEY",
 }
 
 KEY_LABELS = {
@@ -242,6 +257,145 @@ def search_naver_blog(kw, count):
     if res.status_code != 200:
         raise RuntimeError(f"네이버 검색 API 오류 {res.status_code}: {res.text[:120]}")
     return res.json().get("items", [])
+
+
+# ==========================================
+# [셰어인포 사이트 · 쿠팡 상품]
+# ==========================================
+class SiteError(Exception):
+    pass
+
+
+def site_enabled():
+    return bool(str(CONFIG.get("site_url", "")).strip() and str(CONFIG.get("site_admin_key", "")).strip())
+
+
+def site_public_base():
+    return str(CONFIG.get("site_public_url") or CONFIG.get("site_url") or "").strip().rstrip("/")
+
+
+def site_api(method, params=None, payload=None, timeout=40):
+    """사이트 관리자 상품 API (/api/admin/products) 호출"""
+    url = str(CONFIG.get("site_url", "")).strip().rstrip("/") + "/api/admin/products"
+    try:
+        r = requests.request(method, url, params=params, json=payload, timeout=timeout,
+                             headers={"x-admin-key": str(CONFIG.get("site_admin_key", "")).strip()})
+    except requests.RequestException as e:
+        raise SiteError(f"사이트 연결 실패 ({e.__class__.__name__}) — 사이트 주소 확인")
+    if r.status_code == 401:
+        raise SiteError("사이트 관리자 비밀번호가 맞지 않습니다 (ADMIN_PASSWORD)")
+    if r.status_code in (404, 405):
+        raise SiteError("사이트에 관리자 API 가 없습니다 — 사이트 주소/배포 버전을 확인하세요")
+    try:
+        data = r.json()
+    except ValueError:
+        raise SiteError(f"사이트 응답 오류 (HTTP {r.status_code})")
+    if r.status_code >= 400:
+        raise SiteError(data.get("error") or f"HTTP {r.status_code}")
+    return data
+
+
+def site_check():
+    """연결 확인. returns 등록 상품 수"""
+    if not site_api("GET").get("db"):
+        raise SiteError("사이트가 데모 모드입니다 (Netlify 환경변수 DATA_SOURCE=db 필요)")
+    return int(site_api("GET", {"list": 1, "limit": 1}).get("total", 0))
+
+
+def site_search_products(kw, limit):
+    """키워드와 관련된 사이트 등록 상품 (단어가 많이 맞는 순)"""
+    return site_api("GET", {"list": 1, "q": kw, "limit": limit}).get("products", [])
+
+
+def site_register_products(text):
+    """붙여넣은 상품을 사이트에 등록. returns (등록된 상품 목록, 오류 메시지 목록)"""
+    data = site_api("POST", payload={"text": text}, timeout=90)
+    ok, errs = [], []
+    for r in data.get("results", []):
+        if r.get("ok") and r.get("product"):
+            ok.append(r["product"])
+        elif not r.get("ok"):
+            errs.append(f"{str(r.get('link', ''))[:60]} — {r.get('error')}")
+    return ok, errs
+
+
+def _won(n):
+    return f"{int(n):,}원"
+
+
+def product_card_html(p, date_str):
+    """티스토리 본문용 상품 카드 (인라인 스타일만 사용 — 에디터에서 지워지지 않게)"""
+    name = html.escape(p["name"])
+    buy = html.escape(p.get("buyUrl") or f"https://www.coupang.com/vp/products/{p['id']}", quote=True)
+    img = html.escape(p.get("image", ""), quote=True)
+    price, low, high = p.get("price"), p.get("lowestPrice"), p.get("highestPrice")
+    note = f"{date_str} 기준"
+    if low and high and high > low:
+        note += " · 지금이 추적 최저가" if price <= low else f" · 추적 최저가 {_won(low)}"
+    graph = ""
+    base = site_public_base()
+    if base and CONFIG.get("card_site_link", True):
+        page = html.escape(f"{base}/coupang/{p['id']}", quote=True)
+        graph = (f'<a href="{page}" target="_blank" rel="noopener" style="display:inline-block;'
+                 f'margin:4px;padding:10px 16px;border:1px solid #d1d5db;border-radius:8px;'
+                 f'color:#333333;text-decoration:none;">가격 변동 그래프 보기</a>')
+    return (
+        f'<div style="max-width:560px;margin:28px auto;padding:18px;border:1px solid #e5e7eb;'
+        f'border-radius:12px;text-align:center;">'
+        f'<a href="{buy}" target="_blank" rel="noopener sponsored">'
+        f'<img src="{img}" alt="{name}" style="width:220px;max-width:100%;height:auto;border-radius:8px;"></a>'
+        f'<p style="margin:12px 0 4px;font-size:16px;font-weight:bold;line-height:1.45;">{name}</p>'
+        f'<p style="margin:0 0 4px;font-size:20px;font-weight:bold;color:#e11d48;">{_won(price)}</p>'
+        f'<p style="margin:0 0 12px;font-size:12px;color:#888888;">{note} · 가격은 수시로 바뀔 수 있어요</p>'
+        f'<a href="{buy}" target="_blank" rel="noopener sponsored" style="display:inline-block;margin:4px;'
+        f'padding:10px 18px;background:#2563eb;color:#ffffff;border-radius:8px;text-decoration:none;'
+        f'font-weight:bold;">쿠팡에서 가격 보기</a>{graph}</div>'
+    )
+
+
+def disclosure_html():
+    text = CONFIG.get("coupang_disclosure") or DEFAULT_CONFIG["coupang_disclosure"]
+    return (f'<p style="padding:10px 14px;background:#f5f5f5;border-radius:8px;font-size:13px;'
+            f'color:#555555;">{html.escape(text)}</p>')
+
+
+def insert_products(body, products, date_str):
+    """[PRODUCTn] 자리에 상품 카드를 넣고 맨 위에 파트너스 고지를 붙임.
+    모델이 자리표시를 빠뜨린 상품은 마지막 소제목(마무리) 앞에 모아서 넣음"""
+    leftovers = []
+    for i, p in enumerate(products, 1):
+        card = product_card_html(p, date_str)
+        ph = re.compile(r"(<p[^>]*>\s*)?\[PRODUCT%d\](\s*</p>)?" % i)
+        if ph.search(body):
+            body = ph.sub(lambda _m, c=card: c, body, count=1)
+            body = ph.sub("", body)  # 같은 자리표시가 또 있으면 제거
+        else:
+            leftovers.append(card)
+    body = re.sub(r"(<p[^>]*>\s*)?\[PRODUCT\d+\](\s*</p>)?", "", body)  # 상품 수보다 많은 자리표시
+    if leftovers:
+        block = "\n".join(leftovers)
+        last_h2 = body.rfind("<h2")
+        body = (body[:last_h2] + block + "\n" + body[last_h2:]) if last_h2 > 0 else body + "\n" + block
+    return disclosure_html() + "\n" + body
+
+
+def products_prompt_section(products):
+    lines = []
+    for i, p in enumerate(products, 1):
+        extra = ""
+        if p.get("lowestPrice") and p.get("highestPrice") and p["highestPrice"] > p["lowestPrice"]:
+            extra = f" / 가격 추적 범위 {_won(p['lowestPrice'])}~{_won(p['highestPrice'])}"
+        lines.append(f"{i}. {p['name']} / 현재가 {_won(p['price'])} (작성일 기준){extra}")
+    tags = ", ".join(f"[PRODUCT{i}]" for i in range(1, len(products) + 1))
+    return f"""
+[함께 소개할 쿠팡 상품 — 글 흐름에 자연스럽게 녹일 것]
+{chr(10).join(lines)}
+- 각 상품 이야기가 나오는 문단 바로 뒤에 {tags} 를 각각 단독 줄로 한 번씩 배치 (상품 카드가 들어갈 자리)
+- 상품 스펙·용량·성분은 위 상품명에 있는 정보만 사용. 없는 정보는 지어내지 말 것
+- 가격은 '작성일 기준'으로만 언급하고, '최저가 보장'·'무조건 이득' 같은 단정·과장 표현 금지
+- 구매를 재촉하는 광고 문구 대신, 어떤 사람에게 어떤 상품이 맞는지 고르는 기준 위주로
+- 상품이 2개 이상이면 비교표(<table>)에 상품명 기준 비교를 넣어도 좋음
+"""
 
 
 # ==========================================
@@ -499,8 +653,12 @@ def clean_model_output(text):
     return text.strip()
 
 
-def build_prompt(kw, source_text, style):
+def build_prompt(kw, source_text, style, products=None):
     title_format = random.choice(TITLE_FORMATS)
+    product_section = products_prompt_section(products) if products else ""
+    if not source_text.strip():
+        source_text = ("(참고자료 없음 — 상품 정보와 누구나 아는 일반 상식 수준에서만 작성. "
+                       "확인되지 않은 수치·효능·후기는 쓰지 말 것)")
     return f"""블로그 글을 작성해주세요. 아래 조건을 반드시 따르세요.
 
 [주제 키워드] {kw}
@@ -551,7 +709,7 @@ def build_prompt(kw, source_text, style):
 - <table>, <thead>, <tbody>, <tr>, <th>, <td> 태그 사용
 - 표 위에 <h3>으로 표 제목 달기
 - 2열 이상, 3행 이상으로 내용이 있을 때만 사용
-
+{product_section}
 [참고자료 — 사실 정보만 참고, 문장은 완전히 새로 쓸 것]
 {source_text[:CONFIG['max_source_chars']]}
 """
@@ -570,6 +728,7 @@ def build_rewrite_prompt(kw, raw, copied, banned):
 - 다음 금지 표현 제거: {banned_list}
 - 키워드 '{kw}'는 4~6회 유지
 - 첫 줄 제목(태그 없이)도 새로 지을 것, [IMG1]~[IMG3] 자리표시와 마지막 줄 '이미지문구: 문구1 | 문구2 | 문구3' 형식 유지
+- [PRODUCT1] 같은 상품 자리표시가 있으면 그대로 유지
 - 마크다운 금지, 설명 없이 결과물만 출력
 
 [겹치는 문장]
@@ -846,12 +1005,59 @@ class StopRequested(Exception):
     pass
 
 
+class ScrollFrame(tk.Frame):
+    """세로 스크롤 영역 — 창이 작아도 내용이 잘리지 않게. 내용은 self.inner 에 넣는다."""
+    _instances = []
+
+    def __init__(self, parent, bg=BG, **kw):
+        super().__init__(parent, bg=bg, **kw)
+        self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
+        self.vbar = tk.Scrollbar(self, orient="vertical", command=self.canvas.yview, bg=BG3)
+        self.inner = tk.Frame(self.canvas, bg=bg)
+        self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.vbar.set)
+        self.vbar.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.inner.bind("<Configure>",
+                        lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>",
+                         lambda e: self.canvas.itemconfigure(self._win, width=e.width))
+        ScrollFrame._instances.append(self)
+        if len(ScrollFrame._instances) == 1:
+            # 마우스 휠: 포인터 아래 위젯이 속한 스크롤 영역을 스크롤 (윈도우 / 리눅스)
+            self.bind_all("<MouseWheel>", ScrollFrame._on_wheel, add="+")
+            self.bind_all("<Button-4>", ScrollFrame._on_wheel, add="+")
+            self.bind_all("<Button-5>", ScrollFrame._on_wheel, add="+")
+
+    @staticmethod
+    def _on_wheel(event):
+        try:
+            w = event.widget.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            return
+        if w is None or isinstance(w, tk.Text):  # 입력칸/로그는 자체 스크롤
+            return
+        while w is not None:
+            if isinstance(w, ScrollFrame):
+                if w.canvas.yview() != (0.0, 1.0):
+                    up = getattr(event, "num", 0) == 4 or getattr(event, "delta", 0) > 0
+                    w.canvas.yview_scroll(-2 if up else 2, "units")
+                return
+            w = getattr(w, "master", None)
+
+    def scroll_top(self):
+        self.canvas.yview_moveto(0)
+
+
 class MacroApp:
     def __init__(self, root):
         self.root = root
         self.root.title("티스토리 자동 발행 매크로")
-        self.root.geometry("980x740")
-        self.root.minsize(860, 640)
+        # 노트북(1366x768)·배율 125~150% 화면에서도 잘리지 않게 화면 크기에 맞춤
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        w, h = min(1000, sw - 40), min(760, sh - 110)  # 작업표시줄·제목줄 여유
+        self.root.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 3)}")
+        self.root.minsize(min(820, w), min(540, h))
         self.root.configure(bg=BG)
         try:
             from PIL import ImageTk
@@ -1037,25 +1243,30 @@ class MacroApp:
         tk.Label(self._sel_screen, text="참고할 글을 선택하세요 (복수 선택, '열기'로 미리보기)",
                  font=(FONT, 8), bg=BG, fg=TEXT_DIM).pack(anchor="w", pady=(0, 6))
 
-        sel_list_wrap = tk.Frame(self._sel_screen, bg=BORDER, padx=1, pady=1)
-        sel_list_wrap.pack(fill="both", expand=True)
-        self._sel_list = tk.Frame(sel_list_wrap, bg=BG2)
-        self._sel_list.pack(fill="both", expand=True, padx=6, pady=6)
-
-        tk.Label(self._sel_screen, text="직접 URL 추가 (여러 개는 공백으로 구분)",
+        # 아래쪽(직접 URL·다음·건너뛰기)을 먼저 배치 → 목록이 길어도 버튼이 밀려나지 않음
+        sel_bottom = tk.Frame(self._sel_screen, bg=BG)
+        sel_bottom.pack(side="bottom", fill="x")
+        tk.Label(sel_bottom, text="직접 URL 추가 (여러 개는 공백으로 구분)",
                  font=(FONT, 8), bg=BG, fg=TEXT_DIM).pack(anchor="w", pady=(8, 2))
-        self._extra_url = tk.Entry(self._sel_screen, font=(FONT, 9), bg=BG2, fg=TEXT,
+        self._extra_url = tk.Entry(sel_bottom, font=(FONT, 9), bg=BG2, fg=TEXT,
                                    insertbackground=TEXT, relief="flat")
         self._extra_url.pack(fill="x", ipady=4)
 
-        self._sel_next_btn = self._btn(self._sel_screen, "다음 →", self._sel_next)
+        self._sel_next_btn = self._btn(sel_bottom, "다음 →", self._sel_next)
         self._sel_next_btn.pack(fill="x", pady=(10, 0))
-        row = tk.Frame(self._sel_screen, bg=BG)
+        row = tk.Frame(sel_bottom, bg=BG)
         row.pack(fill="x", pady=(6, 0))
         self._btn(row, "이 키워드 건너뛰기", self._sel_skip, bg=BG3, fg=TEXT_DIM,
                   size=8, bold=False, pady=6).pack(side="left", fill="x", expand=True, padx=(0, 3))
         self._btn(row, "전체 취소", self._stop, bg=BG3, fg=ERROR,
                   size=8, bold=False, pady=6).pack(side="left", fill="x", expand=True, padx=(3, 0))
+
+        sel_list_wrap = tk.Frame(self._sel_screen, bg=BORDER, padx=1, pady=1)
+        sel_list_wrap.pack(fill="both", expand=True)
+        self._sel_scroll = ScrollFrame(sel_list_wrap, bg=BG2)
+        self._sel_scroll.pack(fill="both", expand=True)
+        self._sel_list = self._sel_scroll.inner
+        self._sel_list.configure(padx=6, pady=6)
         self.root.bind("<Return>", self._on_enter)
 
     def _build_right(self, parent):
@@ -1113,7 +1324,7 @@ class MacroApp:
         self.kw_text.edit_modified(False)
 
     def _on_enter(self, event):
-        if self._sel_screen.winfo_ismapped() and event.widget is not self.kw_text:
+        if self._sel_screen.winfo_ismapped() and not isinstance(event.widget, tk.Text):
             self._sel_next()
 
     def _open_output(self):
@@ -1235,6 +1446,9 @@ class MacroApp:
         self._account = account
         self._base_url = CONFIG["accounts"][account]
         self._sel_results = []
+        self._sel_products = []      # 키워드별 {"items": [사이트 상품], "paste": 붙여넣은 새 상품}
+        self._product_matches = {}   # 키워드별 사이트 관련 상품
+        self._site_warned = False
         self._search_results = {}
         self._warned = set()
         # 백그라운드 스레드에서 tk 변수를 읽지 않도록 미리 복사
@@ -1265,7 +1479,18 @@ class MacroApp:
             except Exception as e:
                 items = []
                 self.log(f"⚠️ [{kw}] 검색 실패: {e}", "warning")
-            self._search_results[idx] = items
+            if site_enabled():
+                try:
+                    matches = site_search_products(kw, int(CONFIG.get("product_match_count", 6)))
+                    if matches:
+                        self.log(f"🛒 {kw}: 관련 상품 {len(matches)}개", "dim")
+                except SiteError as e:
+                    matches = []
+                    if not self._site_warned:
+                        self._site_warned = True
+                        self.log(f"⚠️ 사이트 상품 조회 실패: {e}", "warning")
+                self._product_matches[idx] = matches
+            self._search_results[idx] = items  # 선택 화면은 이 값이 생기면 열림 → 상품 조회 뒤에 기록
             if idx == 0 and self._manual:
                 self.ui(self._show_sel_screen_ui, 0)
 
@@ -1273,6 +1498,9 @@ class MacroApp:
             n = self._auto_count
             self._sel_results = [[it["link"] for it in self._search_results.get(i, [])[:n]]
                                  for i in range(total)]
+            k = int(CONFIG.get("auto_product_count", 3))
+            self._sel_products = [{"items": self._product_matches.get(i, [])[:k], "paste": ""}
+                                  for i in range(total)]
             self.log(f"✅ 상위 {n}개 글 자동 선택", "success")
             self.ui(self._start_generation)
 
@@ -1295,6 +1523,7 @@ class MacroApp:
 
         for w in self._sel_list.winfo_children():
             w.destroy()
+        self._sel_scroll.scroll_top()
         self._cur_check_vars = []
         if not items:
             tk.Label(self._sel_list, text="검색 결과 없음 — 아래에 URL을 직접 넣거나 건너뛰세요",
@@ -1323,10 +1552,53 @@ class MacroApp:
                          anchor="w").pack(anchor="w", padx=(22, 0))
             self._cur_check_vars.append((var, item))
 
+        self._build_product_picker(idx)
+
         if idx + 1 == total:
             self._sel_next_btn.configure(text="✅  선택 완료 → 원고 생성 시작  (Enter)")
         else:
             self._sel_next_btn.configure(text=f"다음 →  ({idx + 2}/{total}번째)  (Enter)")
+
+    def _build_product_picker(self, idx):
+        """선택 화면 아래쪽: 이 글에 넣을 쿠팡 상품 고르기 / 새 상품 붙여넣기"""
+        self._cur_product_vars = []
+        self._cur_paste = None
+        sec = tk.Frame(self._sel_list, bg=BG2)
+        sec.pack(fill="x", pady=(12, 0))
+        tk.Frame(sec, bg=BORDER, height=1).pack(fill="x", pady=(0, 8))
+        tk.Label(sec, text="🛒  쿠팡 상품 연결 (선택) — 체크한 상품이 글에 카드로 들어갑니다",
+                 font=(FONT, 9, "bold"), bg=BG2, fg=TEXT, wraplength=330,
+                 justify="left").pack(anchor="w")
+        if not site_enabled():
+            tk.Label(sec, text="⚙ 설정에 사이트 주소·관리자 비밀번호를 넣으면 사용할 수 있어요",
+                     font=(FONT, 8), bg=BG2, fg=TEXT_DIM, wraplength=330,
+                     justify="left").pack(anchor="w", pady=(2, 0))
+            return
+        matches = self._product_matches.get(idx) or []
+        k = int(CONFIG.get("auto_product_count", 3))
+        if not matches:
+            tk.Label(sec, text="사이트에 이 키워드와 맞는 상품이 아직 없어요", font=(FONT, 8),
+                     bg=BG2, fg=TEXT_DIM).pack(anchor="w", pady=(2, 0))
+        for j, p in enumerate(matches):
+            var = tk.BooleanVar(value=(j < k))
+            name = p["name"][:30] + ("…" if len(p["name"]) > 30 else "")
+            tk.Checkbutton(sec, text=f"{name}   {_won(p['price'])}", variable=var,
+                           font=(FONT, 9), bg=BG2, fg=TEXT, selectcolor=BG3,
+                           activebackground=BG2, activeforeground=TEXT, anchor="w",
+                           wraplength=330, justify="left").pack(anchor="w")
+            self._cur_product_vars.append((var, p))
+        tk.Label(sec, text="새 상품 붙여넣기 — 파트너스 HTML 또는 '링크 ⇥ 상품명 ⇥ 가격 ⇥ 이미지주소' "
+                           "(사이트에도 자동 등록)",
+                 font=(FONT, 8), bg=BG2, fg=TEXT_DIM, wraplength=330,
+                 justify="left").pack(anchor="w", pady=(8, 2))
+        self._cur_paste = tk.Text(sec, height=3, font=(FONT, 9), bg=BG3, fg=TEXT,
+                                  insertbackground=TEXT, relief="flat", wrap="none", undo=True)
+        self._cur_paste.pack(fill="x")
+
+    def _current_products(self):
+        items = [p for var, p in getattr(self, "_cur_product_vars", []) if var.get()]
+        paste = self._cur_paste.get("1.0", "end").strip() if getattr(self, "_cur_paste", None) else ""
+        return {"items": items, "paste": paste}
 
     def _sel_next(self):
         if not self._sel_screen.winfo_ismapped():
@@ -1334,10 +1606,12 @@ class MacroApp:
         urls = [item["link"] for var, item in self._cur_check_vars if var.get()]
         urls += [u for u in self._extra_url.get().split() if u.startswith("http")]
         self._sel_results.append(urls)
+        self._sel_products.append(self._current_products())
         self._advance_sel()
 
     def _sel_skip(self):
         self._sel_results.append([])
+        self._sel_products.append({"items": [], "paste": ""})
         self._advance_sel()
 
     def _advance_sel(self):
@@ -1360,10 +1634,38 @@ class MacroApp:
         self._set_running_ui(False)
 
     # ── 원고 생성 ──
-    def _generate_article(self, idx, kw, urls):
+    def _prepare_products(self, kw, prod):
+        """선택한 사이트 상품 + 붙여넣은 새 상품(사이트에 등록) → 글에 넣을 상품 목록"""
+        products = list((prod or {}).get("items") or [])
+        paste = ((prod or {}).get("paste") or "").strip()
+        if paste:
+            if not site_enabled():
+                self.log("  ⚠️ 붙여넣은 상품은 사이트 연동 설정이 있어야 등록돼요 (⚙ 설정)", "warning")
+            else:
+                try:
+                    new, errs = site_register_products(paste)
+                    if new:
+                        self.log(f"  🛒 사이트에 상품 {len(new)}개 등록/갱신", "success")
+                    for e in errs:
+                        self.log(f"  ⚠️ 상품 등록 실패: {e}", "warning")
+                    products += new
+                except SiteError as e:
+                    self.log(f"  ⚠️ 상품 등록 실패: {e}", "warning")
+        seen, result = set(), []
+        for p in products:
+            if p["id"] not in seen:
+                seen.add(p["id"])
+                result.append(p)
+        if result:
+            self.log(f"  🛒 글에 넣을 상품 {len(result)}개: " + ", ".join(p["name"][:18] for p in result[:6]),
+                     "info")
+        return result[:6]
+
+    def _generate_article(self, idx, kw, urls, prod=None):
         """키워드 하나 처리. returns dict 또는 None"""
         style = random.choice(STYLES)
         self.log(f"📝 스타일: {style['name']}", "info")
+        products = self._prepare_products(kw, prod)
 
         source_text = ""
         for url in urls:
@@ -1376,12 +1678,14 @@ class MacroApp:
             time.sleep(random.uniform(0.5, 1.0))
 
         if not source_text:
-            self.log(f"⚠️ [{kw}] 참고할 본문이 없어 건너뜀", "warning")
-            return None
+            if not products:
+                self.log(f"⚠️ [{kw}] 참고할 본문이 없어 건너뜀", "warning")
+                return None
+            self.log("  ⚠️ 참고글 없이 상품 정보만으로 작성합니다 — 발행 전 내용을 꼭 확인하세요", "warning")
 
         self.log(f"🤖 {ai_label()} 원고 생성 중... (1~3분 걸릴 수 있어요)", "info")
         try:
-            raw = clean_model_output(call_ai(build_prompt(kw, source_text, style),
+            raw = clean_model_output(call_ai(build_prompt(kw, source_text, style, products),
                                                  self.log, self.stop_flag))
         except AIError as e:
             self.log(f"❌ [{kw}] 생성 실패: {e}", "error")
@@ -1451,6 +1755,10 @@ class MacroApp:
                 body = body.replace(placeholder, "")
                 self.log(f"  ⚠️ IMG{i + 1} 업로드 실패: {err}", "warning")
 
+        if products:
+            body = insert_products(body, products, datetime.date.today().strftime("%Y.%m.%d"))
+            self.log(f"  🛒 상품 카드 {len(products)}개 + 파트너스 고지 삽입", "success")
+
         path = save_article_html(self._out_dir, idx + 1, kw, title, body)
         self.log(f"  💾 저장: {os.path.relpath(path, APP_DIR)}", "dim")
         return {"kw": kw, "title": title, "body": body}
@@ -1469,8 +1777,9 @@ class MacroApp:
                 self.set_progress(f"원고 생성 [{idx + 1}/{total}] {kw}", idx, total)
                 self.log(f"\n{'=' * 36}\n[{idx + 1}/{total}] 키워드: {kw}", "info")
                 urls = self._sel_results[idx] if idx < len(self._sel_results) else []
+                prod = self._sel_products[idx] if idx < len(self._sel_products) else None
                 try:
-                    art = self._generate_article(idx, kw, urls)
+                    art = self._generate_article(idx, kw, urls, prod)
                 except StopRequested:
                     raise
                 except Exception as e:
@@ -1562,30 +1871,42 @@ class MacroApp:
         if getattr(self, "_settings_win", None) and self._settings_win.winfo_exists():
             self._settings_win.lift()
             return
-        win = tk.Toplevel(self.root, bg=BG, padx=20, pady=16)
+        win = tk.Toplevel(self.root, bg=BG, padx=16, pady=12)
         self._settings_win = win
         win.title("설정")
-        win.geometry("540x820")
+        sh = self.root.winfo_screenheight()
+        win.geometry(f"560x{min(860, sh - 110)}")
+        win.minsize(480, min(420, sh - 110))
         win.transient(self.root)
 
+        # 저장 버튼 줄을 먼저 아래에 고정하고, 나머지는 스크롤 영역에
+        bottom_row = tk.Frame(win, bg=BG)
+        bottom_row.pack(fill="x", side="bottom", pady=(10, 0))
+        tk.Label(win, text=f"저장 위치: {CONFIG_PATH}", font=(FONT, 7), bg=BG, fg=TEXT_DIM,
+                 wraplength=500, justify="left").pack(anchor="w", side="bottom", pady=(6, 0))
+        sf = ScrollFrame(win, bg=BG)
+        sf.pack(fill="both", expand=True)
+        body = sf.inner
+        body.configure(padx=4)
+
         if first_run:
-            tk.Label(win, text="처음 실행입니다. 키를 입력하고 저장해주세요.",
+            tk.Label(body, text="처음 실행입니다. 키를 입력하고 저장해주세요.",
                      font=(FONT, 9, "bold"), bg=BG, fg=WARNING).pack(anchor="w", pady=(0, 8))
 
         entries = {}
 
         def field(label, key, secret=False, value=None):
-            tk.Label(win, text=label, font=(FONT, 9), bg=BG, fg=TEXT).pack(anchor="w", pady=(6, 2))
-            e = tk.Entry(win, font=(FONT, 10), bg=BG2, fg=TEXT, insertbackground=TEXT,
+            tk.Label(body, text=label, font=(FONT, 9), bg=BG, fg=TEXT).pack(anchor="w", pady=(6, 2))
+            e = tk.Entry(body, font=(FONT, 10), bg=BG2, fg=TEXT, insertbackground=TEXT,
                          relief="flat", show="•" if secret else "")
             e.insert(0, str(CONFIG.get(key, "") if value is None else value))
             e.pack(fill="x", ipady=4)
             entries[key] = e
 
         # ── 원고 작성 AI ──
-        tk.Label(win, text="원고 작성 AI", font=(FONT, 9, "bold"), bg=BG, fg=TEXT).pack(anchor="w")
+        tk.Label(body, text="원고 작성 AI", font=(FONT, 9, "bold"), bg=BG, fg=TEXT).pack(anchor="w")
         provider_var = tk.StringVar(value=CONFIG.get("ai_provider", "claude_cli"))
-        prow = tk.Frame(win, bg=BG)
+        prow = tk.Frame(body, bg=BG)
         prow.pack(fill="x")
         for val, text in [("claude_cli", "Claude Code (구독, API 비용 없음)"), ("gemini", "Gemini API")]:
             tk.Radiobutton(prow, text=text, variable=provider_var, value=val, font=(FONT, 9),
@@ -1593,7 +1914,7 @@ class MacroApp:
                            activeforeground=TEXT).pack(side="left", padx=(0, 10))
         field("Claude 모델 (비우면 기본값, 예: sonnet / opus)", "claude_model")
         field("Claude Code 실행 파일 경로 (비우면 자동 찾기)", "claude_cli_path")
-        test_row = tk.Frame(win, bg=BG)
+        test_row = tk.Frame(body, bg=BG)
         test_row.pack(fill="x", pady=(6, 0))
         test_label = tk.Label(test_row, text="", font=(FONT, 8), bg=BG, fg=TEXT_DIM,
                               wraplength=330, justify="left")
@@ -1623,29 +1944,72 @@ class MacroApp:
         field("Gemini 모델 (쉼표로 구분, 앞에서부터 시도)", "gemini_models",
               value=", ".join(CONFIG.get("gemini_models", [])))
 
-        tk.Frame(win, bg=BORDER, height=1).pack(fill="x", pady=(12, 4))
+        tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(12, 4))
         field("네이버 Client ID", "naver_client_id")
         field("네이버 Client Secret", "naver_client_secret", secret=True)
         field("imgbb API 키", "imgbb_api_key", secret=True)
+
+        tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(12, 4))
+        tk.Label(body, text="셰어인포 사이트 · 쿠팡 상품 연동 (선택)", font=(FONT, 9, "bold"),
+                 bg=BG, fg=TEXT).pack(anchor="w")
+        field("사이트 주소 (예: https://cococoupa.netlify.app)", "site_url")
+        field("사이트 관리자 비밀번호 (Netlify 의 ADMIN_PASSWORD)", "site_admin_key", secret=True)
+        field("글에 넣을 사이트 링크 주소 (비우면 위 주소, 도메인 연결 후 변경)", "site_public_url")
+        site_row = tk.Frame(body, bg=BG)
+        site_row.pack(fill="x", pady=(6, 0))
+        site_label = tk.Label(site_row, text="", font=(FONT, 8), bg=BG, fg=TEXT_DIM,
+                              wraplength=330, justify="left")
+
+        def test_site():
+            backup = {k: CONFIG.get(k) for k in ("site_url", "site_admin_key")}
+            CONFIG["site_url"] = entries["site_url"].get().strip()
+            CONFIG["site_admin_key"] = entries["site_admin_key"].get().strip()
+            CONFIG["card_site_link"] = bool(card_link_var.get())
+            site_label.configure(text="확인 중...", fg=TEXT_DIM)
+
+            def work():
+                try:
+                    n = site_check()
+                    msg, color = f"✅ 연결됨 · 등록 상품 {n:,}개", SUCCESS
+                except SiteError as e:
+                    msg, color = f"❌ {e}", ERROR
+                finally:
+                    CONFIG.update(backup)  # 저장 전에는 원래 값 유지
+                self.ui(lambda: site_label.winfo_exists() and site_label.configure(text=msg, fg=color))
+            threading.Thread(target=work, daemon=True).start()
+
+        self._btn(site_row, "사이트 연결 테스트", test_site, bg=BG3, fg=TEXT, size=8,
+                  bold=False, pady=4).pack(side="left", ipadx=8)
+        site_label.pack(side="left", padx=8)
+        card_link_var = tk.BooleanVar(value=bool(CONFIG.get("card_site_link", True)))
+        tk.Checkbutton(body, text="상품 카드에 '가격 변동 그래프 보기' 버튼(사이트 링크) 넣기",
+                       variable=card_link_var, font=(FONT, 9), bg=BG, fg=TEXT, selectcolor=BG3,
+                       activebackground=BG, activeforeground=TEXT).pack(anchor="w", pady=(6, 0))
+        field("쿠팡 파트너스 고지 문구 (글 맨 위에 들어감 — 지우지 마세요)", "coupang_disclosure")
         field("크롬 메인 버전 (비우면 자동 감지, 오류 날 때만 예: 145)", "chrome_version_main",
               value=CONFIG.get("chrome_version_main") or "")
         field("참고글 겹침 허용치 (0~1, 낮을수록 원고를 더 많이 바꿈)", "max_similarity")
 
-        tk.Label(win, text="티스토리 계정 (한 줄에 '이름 URL')", font=(FONT, 9),
+        tk.Label(body, text="티스토리 계정 (한 줄에 '이름 URL')", font=(FONT, 9),
                  bg=BG, fg=TEXT).pack(anchor="w", pady=(6, 2))
-        acc_text = tk.Text(win, font=(FONT, 10), bg=BG2, fg=TEXT, insertbackground=TEXT,
+        acc_text = tk.Text(body, font=(FONT, 10), bg=BG2, fg=TEXT, insertbackground=TEXT,
                            relief="flat", height=4)
         acc_text.insert("1.0", "\n".join(f"{k} {v}" for k, v in (CONFIG.get("accounts") or {}).items()))
         acc_text.pack(fill="x")
 
         def show_secrets():
-            for k in ("naver_client_secret", "gemini_api_key", "imgbb_api_key"):
+            for k in ("naver_client_secret", "gemini_api_key", "imgbb_api_key", "site_admin_key"):
                 entries[k].configure(show="" if entries[k].cget("show") else "•")
 
         def save():
             for k in KEY_LABELS:
                 CONFIG[k] = entries[k].get().strip()
             CONFIG["ai_provider"] = provider_var.get()
+            for k in ("site_url", "site_public_url"):
+                CONFIG[k] = entries[k].get().strip().rstrip("/")
+            CONFIG["site_admin_key"] = entries["site_admin_key"].get().strip()
+            CONFIG["coupang_disclosure"] = (entries["coupang_disclosure"].get().strip()
+                                            or DEFAULT_CONFIG["coupang_disclosure"])
             CONFIG["claude_model"] = entries["claude_model"].get().strip()
             CONFIG["claude_cli_path"] = entries["claude_cli_path"].get().strip()
             CONFIG["gemini_models"] = [m.strip() for m in entries["gemini_models"].get().split(",")
@@ -1676,13 +2040,9 @@ class MacroApp:
                      "warning" if miss else "success")
             win.destroy()
 
-        row = tk.Frame(win, bg=BG)
-        row.pack(fill="x", side="bottom", pady=(12, 0))
-        self._btn(row, "저장", save, pady=8).pack(side="right", ipadx=20)
-        self._btn(row, "키 보기/숨기기", show_secrets, bg=BG3, fg=TEXT, size=9,
+        self._btn(bottom_row, "저장", save, pady=8).pack(side="right", ipadx=20)
+        self._btn(bottom_row, "키 보기/숨기기", show_secrets, bg=BG3, fg=TEXT, size=9,
                   bold=False, pady=8).pack(side="left", ipadx=8)
-        tk.Label(win, text=f"저장 위치: {CONFIG_PATH}", font=(FONT, 7), bg=BG, fg=TEXT_DIM,
-                 wraplength=470, justify="left").pack(anchor="w", side="bottom", pady=(8, 0))
 
 
 def main():
