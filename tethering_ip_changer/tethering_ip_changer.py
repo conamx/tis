@@ -16,6 +16,7 @@ PC 를 안드로이드 폰의 USB 테더링(또는 핫스팟)으로 인터넷에
 """
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -108,15 +109,99 @@ def get_public_ip(timeout=4):
     return None
 
 
-def get_device(adb):
-    """연결된 기기 상태 문자열 반환 (없으면 None)"""
+CONFIG_PATH = os.path.join(app_dir(), "config.json")
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def list_devices(adb):
+    """[(serial, state), ...]"""
     code, out = run_adb(adb, ["devices"])
     if code != 0:
-        return None
+        return []
+    result = []
     for line in out.splitlines()[1:]:
         parts = line.split()
         if len(parts) >= 2:
-            return f"{parts[0]} ({parts[1]})"
+            result.append((parts[0], parts[1]))
+    return result
+
+
+def pick_device(adb):
+    """사용할 기기 serial 반환. 무선(IP:포트) 연결을 우선 사용"""
+    ready = [s for s, st in list_devices(adb) if st == "device"]
+    if not ready:
+        return None
+    wireless = [s for s in ready if ":" in s]
+    return (wireless or ready)[0]
+
+
+def get_device(adb):
+    """화면 표시용 기기 상태 문자열 (없으면 None)"""
+    devs = list_devices(adb)
+    if not devs:
+        return None
+    return ", ".join(f"{s} ({'무선' if ':' in s else 'USB'}, {st})" for s, st in devs)
+
+
+def wireless_reconnect(adb):
+    """저장된 무선 주소로 다시 연결 시도"""
+    addr = load_config().get("wireless_addr")
+    if addr and addr not in [s for s, _ in list_devices(adb)]:
+        run_adb(adb, ["connect", addr], timeout=6)
+
+
+def setup_wireless(adb, log=print):
+    """USB 로 연결된 상태에서 무선 ADB(핫스팟 경유)를 켜고 연결"""
+    usb = [s for s, st in list_devices(adb) if st == "device" and ":" not in s]
+    if not usb:
+        log("[오류] 처음 한 번은 USB 케이블로 연결해야 합니다 (USB 디버깅 허용 필요).")
+        return None
+    serial = usb[0]
+    # 폰의 핫스팟/와이파이 인터페이스 IP 찾기
+    _, out = run_adb(adb, ["-s", serial, "shell", "ip", "-4", "-o", "addr", "show"])
+    found = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 4 or parts[2] != "inet":
+            continue
+        iface, ip = parts[1], parts[3].split("/")[0]
+        if ip.startswith("127.") or iface.startswith(("rmnet", "ccmni", "rndis", "usb", "dummy")):
+            continue
+        prio = 0 if iface.startswith(("swlan", "ap", "softap", "wlan1")) else 1
+        found.append((prio, iface, ip))
+    if not found:
+        log("[오류] 폰의 핫스팟 IP를 찾지 못했습니다. 핫스팟을 켜고 PC를 연결한 뒤 다시 시도하세요.")
+        return None
+    found.sort()
+    _, iface, ip = found[0]
+    addr = f"{ip}:5555"
+    log(f"폰 핫스팟 주소: {ip} ({iface})")
+    run_adb(adb, ["-s", serial, "tcpip", "5555"])
+    time.sleep(3)
+    code, out = run_adb(adb, ["connect", addr], timeout=10)
+    log(f"  {out}")
+    if "connected" in out and "cannot" not in out:
+        cfg = load_config()
+        cfg["wireless_addr"] = addr
+        save_config(cfg)
+        log("[완료] 무선 연결 성공! 이제 USB 케이블을 빼도 됩니다.")
+        return addr
+    log("[실패] 무선 연결 실패. PC가 폰 핫스팟에 연결돼 있는지 확인하세요.")
     return None
 
 
@@ -125,9 +210,11 @@ class IpChanger:
         self.adb = adb
         self.log = log
         self.stop_flag = False
+        self.serial = None
 
     def shell(self, *cmd, timeout=15):
-        return run_adb(self.adb, ["shell"] + list(cmd), timeout=timeout)
+        pre = ["-s", self.serial] if self.serial else []
+        return run_adb(self.adb, pre + ["shell"] + list(cmd), timeout=timeout)
 
     # --- 폰 제어
     def airplane(self, on):
@@ -140,11 +227,15 @@ class IpChanger:
                        "--ez", "state", "true" if on else "false")
 
     def mobile_data(self, on):
-        self.shell("svc", "data", "enable" if on else "disable")
+        code, out = self.shell("svc", "data", "enable" if on else "disable")
+        if code != 0 or "Exception" in out or "Unknown" in out:
+            self.log(f"  (svc data 실패: {out}) 다른 방식 시도")
+            self.shell("cmd", "phone", "data", "enable" if on else "disable")
 
     def restore_usb_tethering(self):
         self.log("  USB 테더링 다시 켜는 중...")
-        run_adb(self.adb, ["wait-for-device"], timeout=20)
+        pre = ["-s", self.serial] if self.serial else []
+        run_adb(self.adb, pre + ["wait-for-device"], timeout=20)
         code, out = self.shell("svc", "usb", "setFunctions", "rndis")
         if code != 0:
             self.log(f"  (자동 재연결 실패: {out}) 폰에서 USB 테더링을 직접 켜주세요.")
@@ -178,13 +269,17 @@ class IpChanger:
             self.log("  모바일데이터 ON")
             self.mobile_data(True)
         self.log("  인터넷 재연결 대기 중...")
-        return self.wait_internet(60, usb_tether)
+        # 모바일데이터 방식은 테더링/핫스팟이 유지되므로 USB 재연결 불필요
+        return self.wait_internet(60, usb_tether and mode == MODE_AIRPLANE)
 
-    def change(self, mode=MODE_AIRPLANE, off_seconds=3, retries=3, usb_tether=True):
+    def change(self, mode=MODE_DATA, off_seconds=3, retries=3, usb_tether=True):
         self.stop_flag = False
-        if not get_device(self.adb):
-            self.log("[오류] 연결된 폰이 없습니다. USB 디버깅 / 케이블을 확인하세요.")
+        wireless_reconnect(self.adb)
+        self.serial = pick_device(self.adb)
+        if not self.serial:
+            self.log("[오류] 연결된 폰이 없습니다. USB 케이블 / USB 디버깅 / 무선 연결을 확인하세요.")
             return None
+        self.log(f"기기: {self.serial} ({'무선' if ':' in self.serial else 'USB'})")
         old_ip = get_public_ip()
         self.log(f"현재 IP: {old_ip or '확인 불가'}")
         for attempt in range(1, retries + 1):
@@ -212,7 +307,7 @@ def run_gui(adb):
 
     root = tk.Tk()
     root.title("테더링 IP 변경기")
-    root.geometry("520x560")
+    root.geometry("540x640")
     root.minsize(460, 480)
 
     lines = []
@@ -239,11 +334,11 @@ def run_gui(adb):
     # 설정
     opt = ttk.LabelFrame(root, text="설정", padding=10)
     opt.pack(fill="x", padx=10)
-    mode_var = tk.StringVar(value=MODE_AIRPLANE)
-    ttk.Radiobutton(opt, text="비행기모드 껐다켜기 (권장)", variable=mode_var,
-                    value=MODE_AIRPLANE).grid(row=0, column=0, columnspan=2, sticky="w")
-    ttk.Radiobutton(opt, text="모바일데이터 껐다켜기", variable=mode_var,
-                    value=MODE_DATA).grid(row=1, column=0, columnspan=2, sticky="w")
+    mode_var = tk.StringVar(value=load_config().get("mode", MODE_DATA))
+    ttk.Radiobutton(opt, text="모바일데이터 껐다켜기 (핫스팟 안 끊김, 권장)", variable=mode_var,
+                    value=MODE_DATA).grid(row=0, column=0, columnspan=2, sticky="w")
+    ttk.Radiobutton(opt, text="비행기모드 껐다켜기 (IP 확실히 바뀜, 핫스팟은 끊김)", variable=mode_var,
+                    value=MODE_AIRPLANE).grid(row=1, column=0, columnspan=2, sticky="w")
 
     off_var = tk.IntVar(value=3)
     retry_var = tk.IntVar(value=3)
@@ -255,7 +350,7 @@ def run_gui(adb):
     ttk.Spinbox(opt, from_=1, to=10, textvariable=retry_var, width=6).grid(row=3, column=1, sticky="w")
     ttk.Label(opt, text="자동 반복(분, 0=끔)").grid(row=4, column=0, sticky="w", pady=2)
     ttk.Spinbox(opt, from_=0, to=1440, textvariable=auto_var, width=6).grid(row=4, column=1, sticky="w")
-    ttk.Checkbutton(opt, text="USB 테더링 끊기면 자동 재연결",
+    ttk.Checkbutton(opt, text="(비행기모드 사용 시) USB 테더링 자동 재연결",
                     variable=usb_var).grid(row=5, column=0, columnspan=2, sticky="w")
 
     # 버튼
@@ -264,6 +359,7 @@ def run_gui(adb):
 
     def refresh():
         def work():
+            wireless_reconnect(adb)
             dev = get_device(adb) or "연결 안 됨"
             ip = get_public_ip() or "확인 불가"
             root.after(0, lambda: (dev_var.set(dev), ip_var.set(ip)))
@@ -287,6 +383,10 @@ def run_gui(adb):
         busy["v"] = True
         change_btn.config(state="disabled")
 
+        cfg = load_config()
+        cfg["mode"] = mode_var.get()
+        save_config(cfg)
+
         def work():
             try:
                 ip = changer.change(mode_var.get(), int(off_var.get()),
@@ -309,10 +409,23 @@ def run_gui(adb):
             auto_job["id"] = None
         log("중지됨 (자동 반복 해제)")
 
-    change_btn = ttk.Button(btns, text="IP 변경", command=do_change)
-    change_btn.pack(side="left", expand=True, fill="x", padx=2, ipady=6)
-    ttk.Button(btns, text="IP / 기기 확인", command=refresh).pack(side="left", expand=True, fill="x", padx=2, ipady=6)
-    ttk.Button(btns, text="중지", command=stop).pack(side="left", expand=True, fill="x", padx=2, ipady=6)
+    def do_wireless():
+        log("무선 연결 설정 시작 (USB 연결 + PC가 폰 핫스팟에 접속된 상태여야 함)")
+
+        def work():
+            setup_wireless(adb, log)
+            root.after(0, refresh)
+        threading.Thread(target=work, daemon=True).start()
+
+    style = ttk.Style()
+    style.configure("Big.TButton", font=("맑은 고딕", 14, "bold"))
+    change_btn = ttk.Button(btns, text="IP 변경 (F5)", style="Big.TButton", command=do_change)
+    change_btn.pack(fill="x", ipady=10, pady=(0, 6))
+    row2 = ttk.Frame(btns)
+    row2.pack(fill="x")
+    ttk.Button(row2, text="IP / 기기 확인", command=refresh).pack(side="left", expand=True, fill="x", padx=2, ipady=4)
+    ttk.Button(row2, text="무선 연결 설정", command=do_wireless).pack(side="left", expand=True, fill="x", padx=2, ipady=4)
+    ttk.Button(row2, text="중지", command=stop).pack(side="left", expand=True, fill="x", padx=2, ipady=4)
 
     box = scrolledtext.ScrolledText(root, height=12, font=("Consolas", 9))
     box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -329,7 +442,7 @@ def run_gui(adb):
 def main():
     ap = argparse.ArgumentParser(description="테더링 IP 변경 프로그램")
     ap.add_argument("--change", action="store_true", help="GUI 없이 IP 1회 변경")
-    ap.add_argument("--mode", choices=[MODE_AIRPLANE, MODE_DATA], default=MODE_AIRPLANE)
+    ap.add_argument("--mode", choices=[MODE_AIRPLANE, MODE_DATA], default=MODE_DATA)
     ap.add_argument("--off", type=int, default=3, help="끈 상태 유지 시간(초)")
     ap.add_argument("--retries", type=int, default=3)
     ap.add_argument("--no-usb", action="store_true", help="USB 테더링 자동 재연결 안 함")

@@ -20,6 +20,17 @@
    - PC에 USB 연결 후 폰에 뜨는 "USB 디버깅 허용" → 항상 허용 체크 후 확인
    - USB 테더링(또는 핫스팟) 켜기
 
+[핫스팟으로 쓸 때 - 권장 설정]
+- 모드: "모바일데이터 껐다켜기" (기본값)
+  핫스팟은 그대로 켜져 있고 인터넷만 3~5초 끊겼다가 새 IP로 돌아옵니다.
+  비행기모드는 와이파이(핫스팟)까지 꺼지므로 핫스팟 사용 시 비추천.
+- 케이블 없이 쓰기 (무선 연결):
+  1) 폰 핫스팟 켜고 PC를 핫스팟에 접속
+  2) USB 케이블로 폰 연결 (처음 한 번만)
+  3) "무선 연결 설정" 버튼 → "무선 연결 성공" 나오면 케이블 빼기
+  4) 이후엔 버튼만 누르면 됨. 주소는 config.json 에 저장되어 다음 실행 때 자동 연결
+  ※ 폰을 재부팅하면 무선 설정이 풀립니다 → 케이블 꽂고 3)만 다시 하면 됨
+
 [사용]
 - 실행.bat 더블클릭
 - "IP 변경" 버튼 (또는 F5) → 10~30초 후 새 IP 표시
@@ -27,7 +38,7 @@
 
 [명령줄로 쓰기]
   python tethering_ip_changer.py --change
-  python tethering_ip_changer.py --change --mode data --off 5
+  python tethering_ip_changer.py --change --mode airplane --off 5
 
 [exe 파일로 만들기 (선택)]
   pip install pyinstaller
