@@ -37,14 +37,48 @@ MODE_DATA = "data"
 
 # ---------------------------------------------------------------- 공통 기능
 
+def app_dir():
+    return os.path.dirname(os.path.abspath(sys.argv[0]))
+
+
 def find_adb():
-    base = os.path.dirname(os.path.abspath(sys.argv[0]))
-    names = ("adb.exe", "adb") if os.name == "nt" else ("adb",)
-    for name in names:
-        for path in (os.path.join(base, "platform-tools", name), os.path.join(base, name)):
-            if os.path.isfile(path):
-                return path
+    base = app_dir()
+    name = "adb.exe" if os.name == "nt" else "adb"
+    home = os.path.expanduser("~")
+    candidates = [
+        os.path.join(base, "platform-tools", name),
+        os.path.join(base, "platform-tools", "platform-tools", name),  # 압축을 이중으로 푼 경우
+        os.path.join(base, name),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Android", "Sdk", "platform-tools", name),
+        os.path.join(home, "Downloads", "platform-tools", name),
+        os.path.join(home, "Downloads", "platform-tools-latest-windows", "platform-tools", name),
+        os.path.join(home, "Desktop", "platform-tools", name),
+        "C:\\platform-tools\\" + name,
+        "C:\\adb\\" + name,
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
     return shutil.which("adb")
+
+
+def download_adb(log=print):
+    """구글 공식 서버에서 platform-tools 를 받아 프로그램 폴더에 압축 해제"""
+    import io
+    import zipfile
+    osname = {"nt": "windows", "darwin": "darwin"}.get(
+        os.name if os.name == "nt" else sys.platform, "linux")
+    url = f"https://dl.google.com/android/repository/platform-tools-latest-{osname}.zip"
+    log(f"adb 다운로드 중... ({url})")
+    with urllib.request.urlopen(url, timeout=60) as r:
+        data = r.read()
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        z.extractall(app_dir())  # zip 안에 platform-tools/ 폴더가 들어있음
+    adb = find_adb()
+    if adb and os.name != "nt":
+        os.chmod(adb, 0o755)
+    log("adb 다운로드 완료")
+    return adb
 
 
 def run_adb(adb, args, timeout=15):
@@ -303,17 +337,35 @@ def main():
 
     adb = find_adb()
     if not adb:
-        msg = ("adb 를 찾을 수 없습니다.\n"
-               "Android platform-tools 를 내려받아 이 프로그램 폴더에\n"
-               "'platform-tools' 폴더째로 넣어주세요.")
+        fail_msg = ("adb 자동 다운로드에 실패했습니다.\n\n"
+                    "https://developer.android.com/tools/releases/platform-tools\n"
+                    "에서 Windows용 zip 을 받아 압축을 풀고,\n"
+                    "'platform-tools' 폴더를 아래 폴더 안에 넣어주세요.\n\n" + app_dir())
         if args.change:
-            print(msg)
+            try:
+                adb = download_adb()
+            except Exception as e:  # noqa: BLE001
+                print(f"{fail_msg}\n({e})")
+                sys.exit(1)
         else:
             import tkinter as tk
             from tkinter import messagebox
-            tk.Tk().withdraw()
-            messagebox.showerror("adb 없음", msg)
-        sys.exit(1)
+            tmp = tk.Tk()
+            tmp.withdraw()
+            if not messagebox.askyesno(
+                    "adb 없음",
+                    "adb(안드로이드 연결 도구)가 없습니다.\n"
+                    "구글 공식 서버에서 자동으로 내려받을까요? (약 7MB)"):
+                sys.exit(1)
+            try:
+                adb = download_adb()
+            except Exception as e:  # noqa: BLE001
+                messagebox.showerror("다운로드 실패", f"{fail_msg}\n\n({e})")
+                sys.exit(1)
+            tmp.destroy()
+        if not adb:
+            print(fail_msg)
+            sys.exit(1)
 
     if args.change:
         ok = IpChanger(adb).change(args.mode, args.off, args.retries, not args.no_usb)
