@@ -1,0 +1,45 @@
+테더링 IP 변경기 사용법
+========================
+
+[원리]
+폰의 비행기모드(또는 모바일데이터)를 PC에서 ADB로 껐다 켜면
+통신사가 새 공인 IP를 할당합니다. 테더링으로 연결된 PC의 IP도 같이 바뀝니다.
+
+[준비 - 처음 한 번만]
+1. Python 설치 (https://www.python.org, 설치 시 "Add Python to PATH" 체크)
+2. Android platform-tools 다운로드
+   https://developer.android.com/tools/releases/platform-tools
+   압축을 풀어서 나온 "platform-tools" 폴더를 이 폴더 안에 넣기
+     tethering_ip_changer\
+       ├ tethering_ip_changer.py
+       ├ 실행.bat
+       └ platform-tools\adb.exe ...
+3. 폰 설정
+   - 설정 > 휴대전화 정보 > 소프트웨어 정보 > "빌드번호" 7번 터치 → 개발자 옵션 활성화
+   - 개발자 옵션 > "USB 디버깅" ON
+   - PC에 USB 연결 후 폰에 뜨는 "USB 디버깅 허용" → 항상 허용 체크 후 확인
+   - USB 테더링(또는 핫스팟) 켜기
+
+[사용]
+- 실행.bat 더블클릭
+- "IP 변경" 버튼 (또는 F5) → 10~30초 후 새 IP 표시
+- 자동 반복(분)에 숫자를 넣으면 그 간격마다 자동으로 변경
+
+[명령줄로 쓰기]
+  python tethering_ip_changer.py --change
+  python tethering_ip_changer.py --change --mode data --off 5
+
+[exe 파일로 만들기 (선택)]
+  pip install pyinstaller
+  pyinstaller --onefile --noconsole tethering_ip_changer.py
+  → dist\tethering_ip_changer.exe 옆에 platform-tools 폴더를 같이 두면 됨
+
+[문제 해결]
+- "연결된 폰이 없습니다" : 케이블(데이터 전송용인지), USB 디버깅, 허용 팝업 확인
+  기기가 (unauthorized)로 나오면 폰 화면의 허용 팝업을 눌러주세요.
+- 비행기모드 후 USB 테더링이 꺼짐 : "자동 재연결" 옵션이 켜져 있으면 다시 켜줍니다.
+  기종에 따라 안 되면 폰에서 직접 켜거나, 모드를 "모바일데이터"로 바꿔보세요.
+  (USB 대신 와이파이 핫스팟을 쓰면 이 문제가 거의 없습니다.)
+- IP가 안 바뀜 : "끈 상태 유지(초)"를 5~10초로 늘려보세요.
+  통신사/요금제에 따라 같은 IP가 다시 할당되는 경우가 있습니다.
+- 모바일데이터 모드가 동작 안 함 : 일부 기종은 svc data 명령을 막아둡니다. 비행기모드를 사용하세요.
