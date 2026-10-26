@@ -228,6 +228,20 @@ def strip_tags(text):
     return re.sub(r"<[^>]+>", "", text or "")
 
 
+# http(s)://, www. 로 시작하는 주소 (끝에 붙은 \%22, \", %22 같은 찌꺼기까지 한 번에)
+_URL_RE = re.compile(r"(?:https?://|www\.)[^\s<>\"'“”‘’()\[\]]*", re.IGNORECASE)
+
+
+def strip_urls(text):
+    """본문에서 링크(<a>)와 URL 텍스트 제거. 링크 글자가 URL 이면 통째로, 아니면 글자만 남김"""
+    text = re.sub(r"<a\b[^>]*>(.*?)</a>",
+                  lambda m: "" if _URL_RE.search(strip_tags(m.group(1))) else m.group(1),
+                  text or "", flags=re.DOTALL | re.IGNORECASE)
+    text = _URL_RE.sub("", text)
+    text = re.sub(r"<p>\s*</p>", "", text)
+    return re.sub(r"[ \t]{2,}", " ", text)
+
+
 # ==========================================
 # [네이버 검색]
 # ==========================================
@@ -259,7 +273,7 @@ def _fetch(url):
 def _clean_text(node):
     for s in node(["script", "style", "nav", "footer", "aside", "header", "form", "noscript"]):
         s.decompose()
-    text = node.get_text(separator="\n", strip=True)
+    text = strip_urls(node.get_text(separator="\n", strip=True))
     return re.sub(r"\n{3,}", "\n\n", text)
 
 
@@ -496,7 +510,7 @@ def clean_model_output(text):
     text = re.sub(r"^###\s+(.+)$", r"<h3>\1</h3>", text, flags=re.MULTILINE)
     text = re.sub(r"^##\s+(.+)$", r"<h2>\1</h2>", text, flags=re.MULTILINE)
     text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
-    return text.strip()
+    return strip_urls(text).strip()
 
 
 def build_prompt(kw, source_text, style):
@@ -536,6 +550,7 @@ def build_prompt(kw, source_text, style):
 - <h2>, <h3>, <p>, <ul>, <li>, <strong>, <table> 사용
 - 마크다운(##, **, __ 등) 절대 금지
 - 인사말, 닉네임, 블로그명 절대 금지
+- 링크(<a>), URL, 사이트 주소 절대 넣지 말 것
 
 [마지막 줄 — 반드시 이 형식]
 이미지문구: 문구1 | 문구2 | 문구3
