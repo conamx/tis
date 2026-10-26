@@ -1,6 +1,7 @@
 # ui.py
 import tkinter as tk
 from tkinter import scrolledtext, messagebox, filedialog, ttk
+import re
 import threading
 from parser import ArticleParser
 from onenote_com import OneNoteManager, SectionInfo
@@ -94,7 +95,7 @@ class OneNoteExporterGUI:
     def __init__(self, root):
         self.root = root
         self.root.title('OneNote 글 내보내기')
-        self.root.geometry('860x760')
+        self.root.geometry('860x830')
         self.root.minsize(640, 500)
         self.root.configure(bg=C['bg'])
         self.root.resizable(True, True)
@@ -172,6 +173,15 @@ class OneNoteExporterGUI:
                  ).grid(row=2, column=1, padx=(0,3), pady=(0,8), ipady=4, sticky='w')
         tk.Label(cfg, text='입력 시 본문 맨 위에 굵게 삽입됩니다', font=(F, 8),
                  bg=C['white'], fg='#94a3b8').grid(row=2, column=2, columnspan=6, padx=(6,6), pady=(0,8), sticky='w')
+
+        tk.Label(cfg, text='영상\n링크', font=(F, 9, 'bold'),
+                 bg=C['white'], fg=C['subtext']).grid(row=3, column=0, padx=(12,4), pady=(0,8), sticky='nw')
+        self.links_txt = tk.Text(cfg, font=(F, 9), width=1, height=3, wrap=tk.NONE,
+                                 relief=tk.FLAT, bg=C['bg'], insertbackground=C['text'])
+        self.links_txt.grid(row=3, column=1, columnspan=5, padx=(0,3), pady=(0,8), sticky='ew')
+        tk.Label(cfg, text='한 줄에 하나씩\n본문 맨 앞에\n따로 삽입', font=(F, 8),
+                 bg=C['white'], fg='#94a3b8', justify=tk.LEFT
+                 ).grid(row=3, column=6, columnspan=3, padx=(6,6), pady=(0,8), sticky='nw')
 
 
         inp = tk.Frame(self.root, bg=C['white'],
@@ -478,9 +488,15 @@ class OneNoteExporterGUI:
         selected = [self.articles[i] for i in sel]
         prefix   = self.prefix_var.get().strip()
         keyword  = self.keyword_var.get().strip()
+        links, bad = self._get_links()
+        if bad:
+            messagebox.showwarning('경고', '링크가 아닌 줄이 있습니다 (http로 시작해야 함):\n' + '\n'.join(bad))
+            return
         msg = f"💾 {len(selected)}개 글을 내보낼까요?\n섹션: {self.section_var.get()}"
         if prefix:
             msg += f"\n접두어: {prefix}"
+        if links:
+            msg += f"\n영상 링크(맨 앞 삽입): {len(links)}개"
         if keyword:
             msg += f"\n키워드(상단삽입): {keyword}"
         if not messagebox.askyesno('확인', msg):
@@ -497,11 +513,22 @@ class OneNoteExporterGUI:
 
         threading.Thread(
             target=self._export_thread,
-            args=(selected, prefix, selected_footers, keyword),
+            args=(selected, prefix, selected_footers, keyword, links),
             daemon=True).start()
 
+    def _get_links(self):
+        """영상 링크 칸에서 링크 목록을 읽는다. 한 줄에 여러 개를 붙여넣어도 공백 기준으로 나눈다.
+        반환: (링크 목록, 링크가 아닌 항목 목록)"""
+        links, bad = [], []
+        for tok in self.links_txt.get('1.0', tk.END).split():
+            if re.match(r'https?://', tok, re.I):
+                links.append(tok)
+            else:
+                bad.append(tok)
+        return links, bad
 
-    def _export_thread(self, selected, prefix, footer_presets, keyword=''):
+
+    def _export_thread(self, selected, prefix, footer_presets, keyword='', links=None):
         def cb(i, total, art):
             pct = i / total
             self.root.after(0, lambda p=pct: self.pb_fill.place(
@@ -514,7 +541,7 @@ class OneNoteExporterGUI:
         result = self.onenote.batch_create_pages(
             selected, title_prefix=prefix, progress_cb=cb,
             add_footer=add_footer, footer_presets=footer_presets,
-            top_keyword=keyword)
+            top_keyword=keyword, top_links=links)
         self.root.after(0, lambda: self._export_done(result, len(selected)))
 
     def _export_done(self, result, total):

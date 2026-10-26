@@ -1,5 +1,5 @@
 # onenote_com.py
-import os, re, shutil, subprocess, tempfile, xml.etree.ElementTree as ET
+import html, os, re, shutil, subprocess, tempfile, xml.etree.ElementTree as ET
 from pathlib import Path
 
 _DEFAULT_TIMEOUT = 300
@@ -41,14 +41,14 @@ class OneNoteManager:
     def get_first_section_id(self):
         return self._find_section_id(self._get_hierarchy_root())
 
-    def create_page(self, article, title_prefix='', add_footer=False, footer_presets=None, top_keyword='', retry=_MAX_RETRY):
+    def create_page(self, article, title_prefix='', add_footer=False, footer_presets=None, top_keyword='', top_links=None, retry=_MAX_RETRY):
         if not self.section_id:
             self.section_id = self.get_first_section_id()
         for attempt in range(1, retry + 2):
             try:
                 prefix = (title_prefix.strip() + ' ') if title_prefix.strip() else ''
                 title  = f"{prefix}{article['title']}"
-                self._create_page_all(title, article, footer_presets=footer_presets or [], top_keyword=top_keyword)
+                self._create_page_all(title, article, footer_presets=footer_presets or [], top_keyword=top_keyword, top_links=top_links or [])
                 return True
             except Exception as e:
                 print(f"[OneNote] 페이지 생성 실패 (시도 {attempt}/{retry+1}): {e}")
@@ -56,12 +56,12 @@ class OneNoteManager:
                     import traceback; traceback.print_exc(); return False
         return False
 
-    def batch_create_pages(self, articles, title_prefix='', progress_cb=None, add_footer=False, footer_presets=None, top_keyword=''):
+    def batch_create_pages(self, articles, title_prefix='', progress_cb=None, add_footer=False, footer_presets=None, top_keyword='', top_links=None):
         result = {'success': 0, 'fail': 0, 'failed_nums': []}
         footer_presets = footer_presets or []
         for i, art in enumerate(articles, 1):
             if progress_cb: progress_cb(i, len(articles), art)
-            if self.create_page(art, title_prefix=title_prefix, add_footer=add_footer, footer_presets=footer_presets, top_keyword=top_keyword):
+            if self.create_page(art, title_prefix=title_prefix, add_footer=add_footer, footer_presets=footer_presets, top_keyword=top_keyword, top_links=top_links):
                 result['success'] += 1
             else:
                 result['fail'] += 1; result['failed_nums'].append(art.get('number','?'))
@@ -133,7 +133,7 @@ class OneNoteManager:
 
     # ── 페이지 단계 ───────────────────────────────────────────
 
-    def _create_page_all(self, title, article, footer_presets=None, top_keyword=''):
+    def _create_page_all(self, title, article, footer_presets=None, top_keyword='', top_links=None):
         """페이지 생성 + 제목 + 본문을 단일 PowerShell 세션에서 처리"""
         from parser import strip_markdown, to_onenote_richtext
         tmp = tempfile.mkdtemp(prefix='on_page_')
@@ -147,6 +147,14 @@ class OneNoteManager:
             # 본문 라인 구성
             lines = []
             def add(text, h=False, size=None): lines.append((text, h, size))
+            # 영상 링크 삽입 (본문 맨 앞)
+            # 링크를 한 문단에 줄바꿈으로 붙여 넣으면 블로그 에디터가 첫 링크만 영상으로 바꾸므로,
+            # 링크마다 별도 문단(OE)으로 넣고 사이에 빈 문단을 둔다.
+            # to_onenote_richtext는 URL 속 '_'를 이탤릭으로 바꿔 깨뜨리므로 쓰지 않고 직접 이스케이프한다.
+            for url in (top_links or []):
+                u = html.escape(url, quote=True)
+                add(f'<a href="{u}">{u}</a>')
+                add('')
             # 상단 키워드 삽입 (본문 맨 위, 굵게)
             if top_keyword and top_keyword.strip():
                 add(to_onenote_richtext(top_keyword.strip()), h=True, size=12)
