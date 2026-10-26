@@ -724,7 +724,23 @@ def setup_driver():
     options.add_argument("--window-size=1400,1000")
     options.add_argument("--lang=ko-KR")
     version = CONFIG.get("chrome_version_main")
-    return uc.Chrome(options=options, version_main=int(version) if version else None)
+    try:
+        return uc.Chrome(options=options, version_main=int(version) if version else None)
+    except Exception as e:
+        # 크롬이 아직 업데이트 전이라 드라이버(최신)와 버전이 다를 때: 설치된 버전으로 다시 시도
+        m = re.search(r"Current browser version is (\d+)", str(e))
+        if not m or int(m.group(1)) == (int(version) if version else None):
+            raise
+        detected = int(m.group(1))
+        options = uc.ChromeOptions()
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1400,1000")
+        options.add_argument("--lang=ko-KR")
+        driver = uc.Chrome(options=options, version_main=detected)
+        CONFIG["chrome_version_main"] = detected
+        save_config(CONFIG)
+        return driver
 
 
 def driver_alive(driver):
@@ -1514,7 +1530,7 @@ class MacroApp:
             except Exception as e:
                 self.driver = None
                 self.log(f"⚠️ 크롬 실행 실패: {e}", "warning")
-                self.log("   크롬 버전 문제라면 ⚙ 설정에서 '크롬 메인 버전'을 맞춰주세요.", "warning")
+                self.log("   크롬을 완전히 껐다가 다시 실행해 보세요. 계속되면 ⚙ 설정에서 '크롬 메인 버전'에 크롬 버전 앞자리(예: 155)를 넣어주세요.", "warning")
                 return
         try:
             self.driver.get(self._base_url.rstrip("/") + CONFIG.get("tistory_write_path", "/manage/post"))
