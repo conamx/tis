@@ -99,6 +99,11 @@ DEFAULT_CONFIG = {
     "index_group_by_month": True,
     "index_skip_done": True,          # 이미 올린 글은 제외
     "index_title_tpl": "{name} 글 모음 {n} ({start} ~ {end})",
+    # 원고 생성 시 내 네이버 글 링크를 본문에 자연스럽게 넣기 (구글이 링크를 따라 네이버 글 발견)
+    "naver_link_enabled": True,
+    "naver_links_per_post": 2,        # 글 하나에 넣을 최대 링크 수
+    "naver_link_fallback_box": True,  # AI 가 하나도 안 넣으면 글 끝에 '함께 보면 좋은 글' 추가
+    "naver_cache_hours": 12,          # 네이버 글 목록 캐시 시간
 }
 
 # 환경변수가 있으면 config.json 보다 우선
@@ -494,6 +499,118 @@ def build_index_articles(blog_id, blog_name, posts, per_post=30, group_by_month=
     return articles
 
 
+
+# ==========================================
+# [원고 속 내 네이버 글 링크] — 관련 글 1~2개를 본문 문맥에 자연스럽게 연결
+# ==========================================
+NAVER_CACHE_PATH = os.path.join(APP_DIR, "naver_posts_cache.json")
+LINK_USAGE_PATH = os.path.join(APP_DIR, "naver_link_usage.json")
+
+
+def load_my_naver_posts(blog_id, log=print, force=False):
+    """내 네이버 글 목록 (캐시 사용). returns [ {log_no, title, date(str), desc, url} ]"""
+    hours = float(CONFIG.get("naver_cache_hours", 12) or 0)
+    try:
+        with open(NAVER_CACHE_PATH, encoding="utf-8") as f:
+            cache = json.load(f)
+        if (not force and cache.get("blog_id") == blog_id and cache.get("posts")
+                and time.time() - cache.get("saved", 0) < hours * 3600):
+            return cache["posts"]
+    except Exception:
+        pass
+    _, posts = fetch_naver_post_list(blog_id, log)
+    posts = [dict(p, date=p["date"].isoformat()) for p in posts]
+    try:
+        with open(NAVER_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump({"blog_id": blog_id, "saved": time.time(), "posts": posts}, f,
+                      ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+    return posts
+
+
+def _load_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _bigrams(text):
+    t = re.sub(r"[^0-9A-Za-z가-힣]", "", (text or "").lower())
+    return {t[i:i + 2] for i in range(len(t) - 1)}
+
+
+def pick_link_candidates(kw, posts, context="", n=5):
+    """키워드와 관련도 높은 내 글 후보. 많이 쓴 글은 살짝 뒤로 (14개 링크를 고르게 돌리기)"""
+    usage = _load_json(LINK_USAGE_PATH)
+    q = _bigrams(kw) | _bigrams(context[:300])
+    kq = _bigrams(kw)
+    scored = []
+    for p in posts:
+        pb = _bigrams(p["title"] + " " + p.get("desc", ""))
+        tb = _bigrams(p["title"])
+        rel = (len(q & pb) / (len(q) or 1)) + 2 * (len(kq & tb) / (len(kq) or 1))
+        scored.append((rel - 0.08 * usage.get(p["log_no"], 0) + random.uniform(0, 0.02), p))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [p for _, p in scored[:n]]
+
+
+def build_link_prompt_block(candidates, max_links):
+    if not candidates or max_links <= 0:
+        return ""
+    lines = "\n".join(f"- {p['title']} → {p['url']}" for p in candidates)
+    return f"""
+[내 블로그 글 링크 — 자연스럽게 연결]
+- 아래 글 중 이 주제와 실제로 이어지는 글을 최대 {max_links}개 골라 본문 문단(<p>) 안에 링크로 넣을 것
+- 형식: <a href="URL">문장에 녹아든 표현</a> (예: "...이 부분은 <a href="URL">금리 인하가 대출에 미치는 영향</a>에서 따로 정리해 두었는데...")
+- 링크 문구는 제목을 그대로 복사하지 말고 문맥에 맞게 바꿀 것. '여기', '클릭', '바로가기' 같은 문구 금지
+- 서로 다른 섹션에 1개씩 배치, 같은 링크 중복 금지, 소제목·표 안에는 넣지 말 것
+- 아래 목록에 없는 URL은 절대 만들지 말 것. 억지로 연결될 글이면 넣지 말 것
+{lines}
+"""
+
+
+def finalize_links(body, candidates, all_posts, kw, max_links, fallback=True):
+    """허용되지 않은 링크 제거·중복 정리, 하나도 없으면 글 끝에 관련 글 박스. returns (body, 사용한 글들)"""
+    by_url = {}
+    for p in all_posts:
+        by_url[p["url"]] = p
+        by_url[p["url"].replace("https://blog.naver.com/", "https://m.blog.naver.com/")] = p
+    used, used_nos = [], set()
+
+    def fix(m):
+        attrs, text = m.group(1), m.group(2)
+        href = re.search(r'href\s*=\s*["\']([^"\']+)["\']', attrs)
+        url = href.group(1).split("?")[0].rstrip("/") if href else ""
+        p = by_url.get(url)
+        if not p or p["log_no"] in used_nos or len(used) >= max_links:
+            return text  # 링크만 풀고 문구는 남김
+        used_nos.add(p["log_no"])
+        used.append(p)
+        return f'<a href="{html.escape(p["url"], quote=True)}" target="_blank">{text}</a>'
+
+    body = re.sub(r"<a\b([^>]*)>(.*?)</a>", fix, body, flags=re.DOTALL | re.IGNORECASE)
+    if not used and fallback and candidates and max_links > 0:
+        p = candidates[0]
+        body += (f'\n<p style="margin-top:30px; padding:14px 16px; background:#f6f8fa; '
+                 f'border-left:4px solid #4f9eff;">📌 함께 보면 좋은 글<br>'
+                 f'<a href="{html.escape(p["url"], quote=True)}" target="_blank">'
+                 f'{html.escape(p["title"])}</a></p>')
+        used.append(p)
+    if used:
+        usage = _load_json(LINK_USAGE_PATH)
+        for p in used:
+            usage[p["log_no"]] = usage.get(p["log_no"], 0) + 1
+        try:
+            with open(LINK_USAGE_PATH, "w", encoding="utf-8") as f:
+                json.dump(usage, f, ensure_ascii=False, indent=1)
+        except Exception:
+            pass
+    return body, used
+
+
 # ==========================================
 # [참고글 유사도 검사] — 원고가 참고글을 베끼지 않았는지 확인
 # ==========================================
@@ -697,7 +814,7 @@ def clean_model_output(text):
     return text.strip()
 
 
-def build_prompt(kw, source_text, style):
+def build_prompt(kw, source_text, style, link_block=""):
     title_format = random.choice(TITLE_FORMATS)
     return f"""블로그 글을 작성해주세요. 아래 조건을 반드시 따르세요.
 
@@ -734,7 +851,7 @@ def build_prompt(kw, source_text, style):
 - <h2>, <h3>, <p>, <ul>, <li>, <strong>, <table> 사용
 - 마크다운(##, **, __ 등) 절대 금지
 - 인사말, 닉네임, 블로그명 절대 금지
-
+{link_block}
 [마지막 줄 — 반드시 이 형식]
 이미지문구: 문구1 | 문구2 | 문구3
 - 각 문구는 본문의 서로 다른 소주제를 반영, 15자 이내
@@ -767,6 +884,7 @@ def build_rewrite_prompt(kw, raw, copied, banned):
 - 8글자 이상 같은 표현이 연속되지 않게 할 것
 - 다음 금지 표현 제거: {banned_list}
 - 키워드 '{kw}'는 4~6회 유지
+- 본문의 <a href="..."> 링크는 URL 그대로 유지 (링크 문구는 자연스럽게 바꿔도 됨)
 - 첫 줄 제목(태그 없이)도 새로 지을 것, [IMG1]~[IMG3] 자리표시와 마지막 줄 '이미지문구: 문구1 | 문구2 | 문구3' 형식 유지
 - 마크다운 금지, 설명 없이 결과물만 출력
 
@@ -1205,6 +1323,20 @@ class MacroApp:
         self._auto_n.pack(side="left", padx=2)
         tk.Label(opt, text="개 자동 사용)", font=(FONT, 8), bg=BG, fg=TEXT_DIM).pack(side="left")
 
+        opt_l = tk.Frame(self._kw_screen, bg=BG)
+        opt_l.pack(fill="x", pady=(0, 10))
+        self._link_var = tk.BooleanVar(value=bool(CONFIG.get("naver_link_enabled", True)))
+        tk.Checkbutton(opt_l, text="내 네이버 글 링크 넣기", variable=self._link_var,
+                       font=(FONT, 9), bg=BG, fg=TEXT, selectcolor=BG3,
+                       activebackground=BG, activeforeground=TEXT).pack(side="left")
+        tk.Label(opt_l, text="(글당 최대", font=(FONT, 8), bg=BG, fg=TEXT_DIM).pack(side="left")
+        self._link_n = tk.Spinbox(opt_l, from_=1, to=3, width=3, font=(FONT, 9),
+                                  bg=BG2, fg=TEXT, buttonbackground=BG3, relief="flat")
+        self._link_n.delete(0, "end")
+        self._link_n.insert(0, str(CONFIG.get("naver_links_per_post", 2)))
+        self._link_n.pack(side="left", padx=2)
+        tk.Label(opt_l, text="개)", font=(FONT, 8), bg=BG, fg=TEXT_DIM).pack(side="left")
+
         hdr = tk.Frame(self._kw_screen, bg=BG)
         hdr.pack(fill="x")
         tk.Label(hdr, text="키워드 목록", font=(FONT, 11, "bold"), bg=BG, fg=TEXT).pack(side="left")
@@ -1398,6 +1530,11 @@ class MacroApp:
         CONFIG["last_keywords"] = self.kw_text.get("1.0", "end").strip()
         CONFIG["last_account"] = self._account_var.get()
         CONFIG["manual_select"] = bool(self._manual_var.get())
+        CONFIG["naver_link_enabled"] = bool(self._link_var.get())
+        try:
+            CONFIG["naver_links_per_post"] = min(3, max(1, int(self._link_n.get())))
+        except ValueError:
+            pass
         try:
             CONFIG["auto_pick_count"] = max(1, int(self._auto_n.get()))
         except ValueError:
@@ -1433,6 +1570,7 @@ class MacroApp:
         # 백그라운드 스레드에서 tk 변수를 읽지 않도록 미리 복사
         self._manual = bool(self._manual_var.get())
         self._auto_count = int(CONFIG.get("auto_pick_count", 3))
+        self._link_enabled = bool(self._link_var.get())
         self.log(f"📌 계정: {account} ({self._base_url}) / 키워드 {len(keywords)}개", "info")
         self.set_progress("검색 중...", 0, len(keywords))
         threading.Thread(target=self._search_all, daemon=True).start()
@@ -1581,9 +1719,15 @@ class MacroApp:
             self.log(f"⚠️ [{kw}] 참고할 본문이 없어 건너뜀", "warning")
             return None
 
+        # 내 네이버 글 중 관련 후보
+        my_posts = getattr(self, "_my_posts", None) or []
+        max_links = int(CONFIG.get("naver_links_per_post", 2)) if my_posts else 0
+        candidates = pick_link_candidates(kw, my_posts, kw) if max_links else []
+        link_block = build_link_prompt_block(candidates, max_links)
+
         self.log(f"🤖 {ai_label()} 원고 생성 중... (1~3분 걸릴 수 있어요)", "info")
         try:
-            raw = clean_model_output(call_ai(build_prompt(kw, source_text, style),
+            raw = clean_model_output(call_ai(build_prompt(kw, source_text, style, link_block),
                                                  self.log, self.stop_flag))
         except AIError as e:
             self.log(f"❌ [{kw}] 생성 실패: {e}", "error")
@@ -1627,6 +1771,14 @@ class MacroApp:
         if body_len < min_len:
             self.log(f"  ⚠️ 목표 분량({min_len:,}자)보다 짧습니다", "warning")
 
+        if max_links:
+            body, used = finalize_links(body, candidates, my_posts, kw, max_links,
+                                        bool(CONFIG.get("naver_link_fallback_box", True)))
+            if used:
+                self.log("  🔗 내 네이버 글 링크: " + " / ".join(p["title"][:25] for p in used), "success")
+            else:
+                self.log("  🔗 관련 있는 내 네이버 글이 없어 링크를 넣지 않음", "dim")
+
         # 이미지
         self.log("🖼️ 이미지 생성/업로드 중...", "info")
         body = ensure_img_placeholders(body)
@@ -1664,6 +1816,7 @@ class MacroApp:
         try:
             # 브라우저를 먼저 띄워서, 원고 생성되는 동안 로그인해둘 수 있게
             self._open_browser()
+            self._load_my_posts()
 
             articles = []
             for idx, kw in enumerate(keywords):
@@ -1705,6 +1858,20 @@ class MacroApp:
             self.log(f"❌ 실행 오류: {e}", "error")
         finally:
             self.ui(self._finish_run)
+
+    def _load_my_posts(self):
+        self._my_posts = []
+        if not self._link_enabled:
+            return
+        blog_id = parse_naver_blog_id(CONFIG.get("naver_blog_id", ""))
+        if not blog_id:
+            self.log("⚠️ 네이버 링크 넣기가 켜져 있지만 ⚙ 설정에 네이버 블로그 ID가 없습니다", "warning")
+            return
+        try:
+            self._my_posts = load_my_naver_posts(blog_id, self.log)
+            self.log(f"🔗 내 네이버 글 {len(self._my_posts)}개 — 원고마다 관련 글을 골라 링크합니다", "info")
+        except Exception as e:
+            self.log(f"⚠️ 내 네이버 글 목록을 못 가져와 링크 없이 진행: {e}", "warning")
 
     def _open_browser(self):
         if driver_alive(self.driver):
@@ -1992,7 +2159,7 @@ class MacroApp:
         win = tk.Toplevel(self.root, bg=BG, padx=20, pady=16)
         self._settings_win = win
         win.title("설정")
-        win.geometry("540x820")
+        win.geometry("540x880")
         win.transient(self.root)
 
         if first_run:
@@ -2057,6 +2224,7 @@ class MacroApp:
         field("크롬 메인 버전 (비우면 자동 감지, 오류 날 때만 예: 145)", "chrome_version_main",
               value=CONFIG.get("chrome_version_main") or "")
         field("참고글 겹침 허용치 (0~1, 낮을수록 원고를 더 많이 바꿈)", "max_similarity")
+        field("내 네이버 블로그 ID (원고에 내 글 링크 넣기용, 예: myid)", "naver_blog_id")
 
         tk.Label(win, text="티스토리 계정 (한 줄에 '이름 URL')", font=(FONT, 9),
                  bg=BG, fg=TEXT).pack(anchor="w", pady=(6, 2))
@@ -2077,6 +2245,7 @@ class MacroApp:
             CONFIG["claude_cli_path"] = entries["claude_cli_path"].get().strip()
             CONFIG["gemini_models"] = [m.strip() for m in entries["gemini_models"].get().split(",")
                                        if m.strip()] or DEFAULT_CONFIG["gemini_models"]
+            CONFIG["naver_blog_id"] = entries["naver_blog_id"].get().strip()
             ver = entries["chrome_version_main"].get().strip()
             CONFIG["chrome_version_main"] = int(ver) if ver.isdigit() else None
             try:

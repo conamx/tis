@@ -8,3 +8,5 @@ build/
 dist/
 *.spec
 naver_index_history.json
+naver_posts_cache.json
+naver_link_usage.json
