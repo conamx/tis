@@ -92,6 +92,13 @@ DEFAULT_CONFIG = {
     "max_similarity": 0.12,           # 참고글과 겹치는 비율 상한 (0~1)
     "rewrite_retries": 2,             # 유사도 초과 시 재작성 횟수
     "wait_timeout_min": 30,           # 로그인/발행 대기 시간(분), 0 = 무제한
+    # 네이버 글 목록 → 티스토리 링크 모음글 (구글 색인용)
+    "naver_blog_id": "",
+    "naver_blog_name": "",            # 비우면 RSS 의 블로그 이름
+    "index_per_post": 30,             # 티스토리 글 하나에 넣을 링크 수
+    "index_group_by_month": True,
+    "index_skip_done": True,          # 이미 올린 글은 제외
+    "index_title_tpl": "{name} 글 모음 {n} ({start} ~ {end})",
 }
 
 # 환경변수가 있으면 config.json 보다 우선
@@ -294,6 +301,197 @@ def get_any_web_content(url):
     except Exception as e:
         print(f"스크래핑 실패 {url}: {e}")
         return ""
+
+
+# ==========================================
+# [네이버 글 목록 → 티스토리 링크 모음글]
+#   내 네이버 블로그 글 목록을 모아 티스토리에 '글 모음' 포스트로 올려서
+#   구글 크롤러가 티스토리 → 네이버 글 링크를 따라가 색인하도록 돕는 기능
+# ==========================================
+INDEX_HISTORY_PATH = os.path.join(APP_DIR, "naver_index_history.json")
+
+
+def parse_naver_blog_id(text):
+    """'myid', 'https://blog.naver.com/myid', 'm.blog.naver.com/myid/2233...' → 'myid'"""
+    text = (text or "").strip()
+    m = re.search(r"blogId=([A-Za-z0-9_\-]+)", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"blog\.naver\.com/([A-Za-z0-9_\-]+)", text)
+    if m and m.group(1).lower() not in ("postview.naver", "postlist.naver", "prologue"):
+        return m.group(1)
+    return text if re.fullmatch(r"[A-Za-z0-9_\-]+", text) else ""
+
+
+def naver_post_url(blog_id, log_no):
+    return f"https://blog.naver.com/{blog_id}/{log_no}"
+
+
+def _parse_naver_date(text):
+    """'2024. 1. 5.' → date / '3시간 전', '방금 전' 같은 상대 표기 → 오늘"""
+    m = re.search(r"(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})", text or "")
+    if m:
+        try:
+            return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            pass
+    return datetime.date.today()
+
+
+def fetch_naver_rss(blog_id):
+    """RSS (최근 글 약 50개). returns (블로그 이름, {logNo: {title, date, desc}})"""
+    import xml.etree.ElementTree as ET
+    from email.utils import parsedate_to_datetime
+
+    res = requests.get(f"https://rss.blog.naver.com/{blog_id}.xml", headers=_HEADERS, timeout=10)
+    res.raise_for_status()
+    channel = ET.fromstring(res.content).find("channel")
+    if channel is None:
+        return "", {}
+    name = (channel.findtext("title") or "").strip()
+    posts = {}
+    for item in channel.findall("item"):
+        link = (item.findtext("guid") or "") + " " + (item.findtext("link") or "")
+        m = re.search(r"blog\.naver\.com/[^/\s]+/(\d+)", link) or re.search(r"logNo=(\d+)", link)
+        if not m:
+            continue
+        desc = html.unescape(strip_tags(item.findtext("description") or ""))
+        try:
+            date = parsedate_to_datetime(item.findtext("pubDate") or "").date()
+        except Exception:
+            date = datetime.date.today()
+        posts[m.group(1)] = {
+            "title": html.unescape((item.findtext("title") or "").strip()),
+            "date": date,
+            "desc": re.sub(r"\s+", " ", desc).strip(),
+        }
+    return name, posts
+
+
+def fetch_naver_post_list(blog_id, log=print, stop_flag=None, max_pages=500):
+    """블로그의 전체 공개글 목록. returns (블로그 이름, [ {log_no, title, date, desc, url} ... ]) 최신순"""
+    from urllib.parse import unquote_plus
+
+    name, rss = "", {}
+    try:
+        name, rss = fetch_naver_rss(blog_id)
+    except Exception as e:
+        log(f"  ⚠️ RSS 읽기 실패 (요약 없이 진행): {e}")
+
+    posts, seen, total = [], set(), None
+    session = requests.Session()
+    session.headers.update(_HEADERS)
+    session.headers["Referer"] = f"https://blog.naver.com/{blog_id}"
+    for page in range(1, max_pages + 1):
+        if stop_flag is not None and stop_flag.is_set():
+            break
+        res = session.get("https://blog.naver.com/PostTitleListAsync.naver", timeout=10, params={
+            "blogId": blog_id, "viewdate": "", "currentPage": page, "categoryNo": 0,
+            "parentCategoryNo": "", "countPerPage": 30,
+        })
+        res.raise_for_status()
+        # 제목 안의 작은따옴표가 \' 로 와서 JSON 파싱이 깨지는 경우가 있음
+        data = json.loads(res.text.replace("\\'", "'"))
+        if data.get("resultCode") not in (None, "S"):
+            raise RuntimeError(data.get("resultMessage") or "글 목록 조회 실패 (블로그 ID 확인)")
+        if total is None:
+            try:
+                total = int(data.get("totalCount") or 0)
+            except ValueError:
+                total = 0
+        new = 0
+        for p in data.get("postList") or []:
+            log_no = str(p.get("logNo", ""))
+            if not log_no or log_no in seen:
+                continue
+            seen.add(log_no)
+            new += 1
+            if str(p.get("searchYn", "true")).lower() == "false":
+                continue  # 작성자가 '검색 허용 안 함'으로 둔 글은 제외
+            title = unquote_plus(p.get("title", "")).strip()
+            title = html.unescape(title)
+            r = rss.get(log_no, {})
+            posts.append({
+                "log_no": log_no,
+                "title": title or r.get("title") or log_no,
+                "date": r.get("date") or _parse_naver_date(p.get("addDate", "")),
+                "desc": r.get("desc", ""),
+                "url": naver_post_url(blog_id, log_no),
+            })
+        log(f"  📄 {page}페이지: {len(seen)}/{total or '?'}개", "dim")
+        # 마지막 페이지를 넘기면 네이버가 마지막 페이지를 반복해서 주므로 새 글이 없으면 종료
+        if new == 0 or (total and len(seen) >= total):
+            break
+        time.sleep(random.uniform(0.3, 0.7))
+
+    if not posts and rss:  # 목록 API 가 막히면 RSS(최근 50개)라도 사용
+        log("  ⚠️ 전체 목록 API 실패 — RSS 최근 글만 사용합니다", "warning")
+        posts = [{"log_no": k, "title": v["title"], "date": v["date"], "desc": v["desc"],
+                  "url": naver_post_url(blog_id, k)} for k, v in rss.items()]
+    posts.sort(key=lambda x: (x["date"], int(x["log_no"]) if x["log_no"].isdigit() else 0),
+               reverse=True)
+    return name, posts
+
+
+def load_index_history():
+    try:
+        with open(INDEX_HISTORY_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_index_history(hist):
+    with open(INDEX_HISTORY_PATH, "w", encoding="utf-8") as f:
+        json.dump(hist, f, ensure_ascii=False, indent=1)
+
+
+def build_index_articles(blog_id, blog_name, posts, per_post=30, group_by_month=True,
+                         title_tpl="{name} 글 모음 {n} ({start} ~ {end})", start_no=1):
+    """글 목록 → 티스토리 포스트 여러 개 (오래된 글부터 per_post 개씩)"""
+    esc = html.escape
+    ordered = sorted(posts, key=lambda x: (x["date"], int(x["log_no"]) if x["log_no"].isdigit() else 0))
+    name = blog_name or blog_id
+    home = f"https://blog.naver.com/{blog_id}"
+    articles = []
+    for ci in range(0, len(ordered), per_post):
+        chunk = ordered[ci:ci + per_post]
+        n = start_no + ci // per_post
+        start, end = chunk[0]["date"], chunk[-1]["date"]
+        fmt = lambda d: d.strftime("%Y.%m.%d")
+        title = title_tpl.format(name=name, n=n, start=fmt(start), end=fmt(end), count=len(chunk))
+
+        parts = [
+            f'<p>네이버 블로그 <a href="{esc(home)}">{esc(name)}</a>에 올린 글 '
+            f'{len(chunk)}개를 날짜순으로 정리했습니다 ({fmt(start)} ~ {fmt(end)}). '
+            f'제목을 누르면 원문으로 이동합니다.</p>'
+        ]
+        cur_month, items = None, []
+
+        def flush():
+            if items:
+                parts.append("<ul>" + "".join(items) + "</ul>")
+                items.clear()
+
+        for p in chunk:
+            month = p["date"].strftime("%Y년 %m월")
+            if group_by_month and month != cur_month:
+                flush()
+                parts.append(f"<h3>{month}</h3>")
+                cur_month = month
+            desc = p.get("desc", "")
+            if len(desc) > 110:
+                desc = desc[:110].rsplit(" ", 1)[0] + "…"
+            li = (f'<li><a href="{esc(p["url"], quote=True)}">{esc(p["title"])}</a>'
+                  f' <span style="color:#888;">({fmt(p["date"])})</span>')
+            if desc:
+                li += f'<br><span style="color:#666; font-size:0.95em;">{esc(desc)}</span>'
+            items.append(li + "</li>")
+        flush()
+        parts.append(f'<p>전체 글은 <a href="{esc(home)}">{esc(home)}</a> 에서 볼 수 있습니다.</p>')
+        articles.append({"kw": f"naver_index_{n}", "title": title, "body": "\n".join(parts),
+                         "log_nos": [p["log_no"] for p in chunk], "blog_id": blog_id})
+    return articles
 
 
 # ==========================================
@@ -946,6 +1144,8 @@ class MacroApp:
                   size=9, bold=False, pady=4).pack(side="right", padx=(6, 0), ipadx=8)
         self._btn(title_bar, "⚙ 설정", self._open_settings, bg=BG3, fg=TEXT,
                   size=9, bold=False, pady=4).pack(side="right", ipadx=8)
+        self._btn(title_bar, "📋 네이버 글 목록 → 구글 색인", self._open_naver_index, bg=BG3, fg=TEXT,
+                  size=9, bold=False, pady=4).pack(side="right", padx=(0, 6), ipadx=8)
         tk.Frame(self.root, bg=BORDER, height=1).pack(fill="x", padx=24)
 
         body = tk.Frame(self.root, bg=BG)
@@ -1225,32 +1425,34 @@ class MacroApp:
             self.log("❌ 티스토리 계정을 선택해주세요", "error")
             return
         self._remember_inputs()
-
-        self.running = True
-        self.stop_flag.clear()
-        self.login_event.clear()
-        self.next_event.clear()
-        self._logged_in = False
+        self._begin_run(account)
         self._keywords = keywords
-        self._account = account
-        self._base_url = CONFIG["accounts"][account]
         self._sel_results = []
         self._search_results = {}
         self._warned = set()
         # 백그라운드 스레드에서 tk 변수를 읽지 않도록 미리 복사
         self._manual = bool(self._manual_var.get())
         self._auto_count = int(CONFIG.get("auto_pick_count", 3))
-
-        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._out_dir = os.path.join(APP_DIR, "output", f"{stamp}_{safe_filename(account, 20)}")
-        os.makedirs(self._out_dir, exist_ok=True)
-        os.makedirs(os.path.join(APP_DIR, "logs"), exist_ok=True)
-        self._log_file = os.path.join(APP_DIR, "logs", f"{stamp}.log")
-
-        self._set_running_ui(True)
         self.log(f"📌 계정: {account} ({self._base_url}) / 키워드 {len(keywords)}개", "info")
         self.set_progress("검색 중...", 0, len(keywords))
         threading.Thread(target=self._search_all, daemon=True).start()
+
+    def _begin_run(self, account, suffix=""):
+        """실행 공통 준비: 상태 초기화, 출력/로그 폴더, 버튼 상태"""
+        self.running = True
+        self.stop_flag.clear()
+        self.login_event.clear()
+        self.next_event.clear()
+        self._logged_in = False
+        self._account = account
+        self._base_url = CONFIG["accounts"][account]
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._out_dir = os.path.join(APP_DIR, "output",
+                                     f"{stamp}_{safe_filename(account, 20)}{suffix}")
+        os.makedirs(self._out_dir, exist_ok=True)
+        os.makedirs(os.path.join(APP_DIR, "logs"), exist_ok=True)
+        self._log_file = os.path.join(APP_DIR, "logs", f"{stamp}.log")
+        self._set_running_ui(True)
 
     def _search_all(self):
         """백그라운드: 모든 키워드를 미리 검색해 선택 화면을 바로바로 넘길 수 있게"""
@@ -1524,7 +1726,7 @@ class MacroApp:
                  "로그인 후 [로그인 완료] 버튼을 누르면 됩니다.", "info")
         self.ui(self._show_publish_btn, "✅  로그인 완료")
 
-    def _inject_all(self, articles):
+    def _inject_all(self, articles, on_injected=None):
         n = len(articles)
         done = 0
         for idx, art in enumerate(articles):
@@ -1545,6 +1747,8 @@ class MacroApp:
                 continue
 
             done += 1
+            if on_injected:
+                on_injected(art)
             if idx == n - 1:
                 self.log(f"✅ 마지막 글 [{art['title']}] 주입 완료! 브라우저에서 발행 버튼을 눌러주세요.",
                          "success")
@@ -1556,6 +1760,229 @@ class MacroApp:
 
         self.set_progress(f"✅ {done}/{n}개 주입 완료", n, n)
         self.log(f"\n🎉 {done}/{n}개 주입 완료! (브라우저는 열어둡니다)", "success")
+
+    # ── 네이버 글 목록 → 티스토리 링크 모음글 (구글 색인용) ──
+    def _open_naver_index(self):
+        if getattr(self, "_ni_win", None) and self._ni_win.winfo_exists():
+            self._ni_win.lift()
+            return
+        win = tk.Toplevel(self.root, bg=BG, padx=20, pady=16)
+        self._ni_win = win
+        win.title("네이버 글 목록 → 티스토리 (구글 색인용)")
+        win.geometry("560x720")
+        win.transient(self.root)
+        self._ni_posts, self._ni_pending, self._ni_name, self._ni_blog_id = [], [], "", ""
+
+        tk.Label(win, text="내 네이버 블로그 글 목록을 티스토리에 '글 모음' 포스트로 올립니다.\n"
+                           "구글이 티스토리를 크롤링하면서 링크를 따라 네이버 글을 발견하게 됩니다.",
+                 font=(FONT, 9), bg=BG, fg=TEXT_DIM, justify="left").pack(anchor="w", pady=(0, 6))
+
+        entries = {}
+
+        def field(label, key):
+            tk.Label(win, text=label, font=(FONT, 9), bg=BG, fg=TEXT).pack(anchor="w", pady=(6, 2))
+            e = tk.Entry(win, font=(FONT, 10), bg=BG2, fg=TEXT, insertbackground=TEXT, relief="flat")
+            e.insert(0, str(CONFIG.get(key, "")))
+            e.pack(fill="x", ipady=4)
+            entries[key] = e
+
+        field("네이버 블로그 ID 또는 주소 (예: myid 또는 https://blog.naver.com/myid)", "naver_blog_id")
+        field("표시 이름 (비우면 네이버 블로그 이름 자동)", "naver_blog_name")
+        field("제목 형식 ({name} {n} {start} {end} {count} 사용 가능)", "index_title_tpl")
+
+        opt = tk.Frame(win, bg=BG)
+        opt.pack(fill="x", pady=(10, 0))
+        tk.Label(opt, text="글 하나에 링크", font=(FONT, 9), bg=BG, fg=TEXT).pack(side="left")
+        per_spin = tk.Spinbox(opt, from_=5, to=100, width=4, font=(FONT, 9),
+                              bg=BG2, fg=TEXT, buttonbackground=BG3, relief="flat")
+        per_spin.delete(0, "end")
+        per_spin.insert(0, str(CONFIG.get("index_per_post", 30)))
+        per_spin.pack(side="left", padx=4)
+        tk.Label(opt, text="개", font=(FONT, 9), bg=BG, fg=TEXT).pack(side="left")
+        month_var = tk.BooleanVar(value=bool(CONFIG.get("index_group_by_month", True)))
+        tk.Checkbutton(opt, text="월별로 묶기", variable=month_var, font=(FONT, 9), bg=BG, fg=TEXT,
+                       selectcolor=BG3, activebackground=BG,
+                       activeforeground=TEXT).pack(side="left", padx=(14, 0))
+
+        opt2 = tk.Frame(win, bg=BG)
+        opt2.pack(fill="x", pady=(4, 0))
+        skip_var = tk.BooleanVar(value=bool(CONFIG.get("index_skip_done", True)))
+        tk.Checkbutton(opt2, text="이미 티스토리에 올린 글은 제외 (새 글만)", variable=skip_var,
+                       font=(FONT, 9), bg=BG, fg=TEXT, selectcolor=BG3, activebackground=BG,
+                       activeforeground=TEXT, command=lambda: refresh_pending()).pack(side="left")
+
+        status = tk.Label(win, text="", font=(FONT, 9, "bold"), bg=BG, fg=ACCENT,
+                          wraplength=510, justify="left")
+        status.pack(anchor="w", pady=(10, 4))
+
+        prev_wrap = tk.Frame(win, bg=BORDER, padx=1, pady=1)
+        prev_wrap.pack(fill="both", expand=True)
+        preview = tk.Text(prev_wrap, font=(FONT, 9), bg=BG2, fg=TEXT, relief="flat", bd=6,
+                          wrap="none", state="disabled", height=10)
+        pscroll = tk.Scrollbar(prev_wrap, command=preview.yview, bg=BG3)
+        preview.config(yscrollcommand=pscroll.set)
+        pscroll.pack(side="right", fill="y")
+        preview.pack(fill="both", expand=True)
+
+        def read_opts():
+            CONFIG["naver_blog_id"] = entries["naver_blog_id"].get().strip()
+            CONFIG["naver_blog_name"] = entries["naver_blog_name"].get().strip()
+            CONFIG["index_title_tpl"] = (entries["index_title_tpl"].get().strip()
+                                         or DEFAULT_CONFIG["index_title_tpl"])
+            try:
+                CONFIG["index_per_post"] = min(100, max(5, int(per_spin.get())))
+            except ValueError:
+                pass
+            CONFIG["index_group_by_month"] = bool(month_var.get())
+            CONFIG["index_skip_done"] = bool(skip_var.get())
+            try:
+                save_config(CONFIG)
+            except Exception:
+                pass
+
+        def set_preview(lines):
+            preview.config(state="normal")
+            preview.delete("1.0", "end")
+            preview.insert("1.0", "\n".join(lines))
+            preview.config(state="disabled")
+
+        def refresh_pending():
+            if not self._ni_posts:
+                return
+            done = set(load_index_history().get(self._ni_blog_id, {}).get("log_nos", []))
+            posts = self._ni_posts
+            self._ni_pending = [p for p in posts if p["log_no"] not in done] if skip_var.get() else posts
+            try:
+                per = min(100, max(5, int(per_spin.get())))
+            except ValueError:
+                per = 30
+            k = len(self._ni_pending)
+            already = sum(1 for p in posts if p["log_no"] in done)
+            status.configure(
+                text=f"'{self._ni_name or self._ni_blog_id}' 전체 {len(posts)}개 · 이미 올림 {already}개 · "
+                     f"이번에 올릴 글 {k}개 → 티스토리 글 {-(-k // per) if k else 0}개",
+                fg=ACCENT if k else WARNING)
+            set_preview([f"{p['date']:%Y.%m.%d}  {p['title']}" for p in self._ni_pending] or
+                        ["새로 올릴 글이 없습니다."])
+
+        def load():
+            read_opts()
+            blog_id = parse_naver_blog_id(CONFIG["naver_blog_id"])
+            if not blog_id:
+                status.configure(text="❌ 네이버 블로그 ID를 입력하세요", fg=ERROR)
+                return
+            status.configure(text="⏳ 글 목록 불러오는 중... (글이 많으면 1~2분)", fg=TEXT_DIM)
+            load_btn.configure(state="disabled")
+            self.log(f"\n📋 네이버 블로그 [{blog_id}] 글 목록 수집 시작", "info")
+
+            def work():
+                try:
+                    name, posts = fetch_naver_post_list(blog_id, self.log)
+                    err = None
+                except Exception as e:
+                    name, posts, err = "", [], f"{e.__class__.__name__}: {str(e)[:150]}"
+
+                def done():
+                    if not win.winfo_exists():
+                        return
+                    load_btn.configure(state="normal")
+                    if err or not posts:
+                        status.configure(text=f"❌ 글 목록을 가져오지 못했습니다. {err or '공개글 없음'}",
+                                         fg=ERROR)
+                        self.log(f"❌ 글 목록 수집 실패: {err or '공개글 없음'}", "error")
+                        return
+                    self._ni_blog_id = blog_id
+                    self._ni_name = CONFIG.get("naver_blog_name") or name or blog_id
+                    self._ni_posts = posts
+                    self.log(f"✅ 글 {len(posts)}개 수집 완료", "success")
+                    refresh_pending()
+                self.ui(done)
+            threading.Thread(target=work, daemon=True).start()
+
+        def reset_history():
+            blog_id = parse_naver_blog_id(entries["naver_blog_id"].get())
+            if not blog_id:
+                return
+            if not messagebox.askokcancel(
+                    "기록 초기화", f"[{blog_id}] 의 '이미 올린 글' 기록을 지울까요?\n"
+                                   "다음에는 전체 글을 처음부터 다시 올리게 됩니다.", parent=win):
+                return
+            hist = load_index_history()
+            hist.pop(blog_id, None)
+            save_index_history(hist)
+            self.log(f"🗑 [{blog_id}] 업로드 기록 초기화", "warning")
+            refresh_pending()
+
+        def start():
+            read_opts()
+            if self.running:
+                status.configure(text="❌ 다른 작업이 실행 중입니다", fg=ERROR)
+                return
+            if not self._ni_pending:
+                status.configure(text="❌ 먼저 [글 목록 불러오기]를 하세요 (또는 새 글 없음)", fg=ERROR)
+                return
+            account = self._account_var.get()
+            if account not in (CONFIG.get("accounts") or {}):
+                status.configure(text="❌ 메인 화면에서 티스토리 계정을 선택하세요", fg=ERROR)
+                return
+            hist = load_index_history().get(self._ni_blog_id, {})
+            try:
+                articles = build_index_articles(
+                    self._ni_blog_id, self._ni_name, self._ni_pending,
+                    per_post=int(CONFIG["index_per_post"]),
+                    group_by_month=CONFIG["index_group_by_month"],
+                    title_tpl=CONFIG["index_title_tpl"],
+                    start_no=int(hist.get("posts", 0)) + 1)
+            except (KeyError, IndexError, ValueError) as e:
+                status.configure(text=f"❌ 제목 형식 오류: {e}", fg=ERROR)
+                return
+            CONFIG["last_account"] = account
+            win.destroy()
+            self._begin_run(account, "_naver_index")
+            self.log(f"📌 계정: {account} ({self._base_url}) / 네이버 글 {len(self._ni_pending)}개 → "
+                     f"티스토리 글 {len(articles)}개", "info")
+            for i, art in enumerate(articles):
+                save_article_html(self._out_dir, i + 1, art["kw"], art["title"], art["body"])
+            threading.Thread(target=self._publish_index_articles, args=(articles,), daemon=True).start()
+
+        row = tk.Frame(win, bg=BG)
+        row.pack(fill="x", side="bottom", pady=(12, 0))
+        load_btn = self._btn(row, "1. 글 목록 불러오기", load, bg=BG3, fg=TEXT, size=10, pady=8)
+        load_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self._btn(row, "2. 티스토리에 주입 시작", start, size=10, pady=8).pack(
+            side="left", fill="x", expand=True, padx=(4, 0))
+        self._btn(opt2, "기록 초기화", reset_history, bg=BG3, fg=TEXT_DIM, size=8,
+                  bold=False, pady=2).pack(side="right", ipadx=6)
+
+    def _publish_index_articles(self, articles):
+        def record(art):
+            # 주입에 성공한 글은 '올린 글'로 기록 → 다음엔 새 글만 모음
+            hist = load_index_history()
+            h = hist.setdefault(art["blog_id"], {"log_nos": [], "posts": 0})
+            h["log_nos"] = sorted(set(h["log_nos"]) | set(art["log_nos"]))
+            h["posts"] = int(h.get("posts", 0)) + 1
+            try:
+                save_index_history(hist)
+            except Exception as e:
+                self.log(f"  ⚠️ 기록 저장 실패: {e}", "warning")
+
+        try:
+            self.set_progress("브라우저 준비", 0, len(articles))
+            self._open_browser()
+            if self.driver is None:
+                self.log("⚠️ 브라우저를 열 수 없습니다. 📁 결과 폴더의 HTML을 복사해 쓰세요.", "warning")
+                return
+            self.log("🔐 브라우저에서 티스토리 로그인 후 [로그인 완료] 버튼을 눌러주세요.", "info")
+            self._wait(self.login_event)
+            self._inject_all(articles, on_injected=record)
+            self.log("💡 발행 후 구글 서치콘솔에서 티스토리 사이트맵 제출 / 글 URL '색인 생성 요청'을 "
+                     "하면 더 빨리 크롤링됩니다.", "info")
+        except StopRequested as e:
+            self.log(f"■ {e}" if str(e) else "■ 중지되었습니다", "warning")
+        except Exception as e:
+            self.log(f"❌ 실행 오류: {e}", "error")
+        finally:
+            self.ui(self._finish_run)
 
     # ── 설정 창 ──
     def _open_settings(self, first_run=False):

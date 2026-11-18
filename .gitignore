@@ -7,3 +7,4 @@ __pycache__/
 build/
 dist/
 *.spec
+naver_index_history.json
