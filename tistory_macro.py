@@ -102,7 +102,8 @@ DEFAULT_CONFIG = {
     # 원고 생성 시 내 네이버 글 링크를 본문에 자연스럽게 넣기 (구글이 링크를 따라 네이버 글 발견)
     "naver_link_enabled": True,
     "naver_links_per_post": 2,        # 글 하나에 넣을 최대 링크 수
-    "naver_link_fallback_box": True,  # AI 가 하나도 안 넣으면 글 끝에 '함께 보면 좋은 글' 추가
+    "naver_link_fallback_box": False, # AI 가 하나도 안 넣으면 글 끝에 '함께 보면 좋은 글' 추가 (관련 글일 때만)
+    "naver_link_min_relevance": 0.4,  # 키워드-내 글 제목 관련도 최소값. 낮으면 주제 다른 글에도 링크됨
     "naver_cache_hours": 12,          # 네이버 글 목록 캐시 시간
 }
 
@@ -542,8 +543,11 @@ def _bigrams(text):
     return {t[i:i + 2] for i in range(len(t) - 1)}
 
 
-def pick_link_candidates(kw, posts, context="", n=5):
-    """키워드와 관련도 높은 내 글 후보. 많이 쓴 글은 살짝 뒤로 (14개 링크를 고르게 돌리기)"""
+def pick_link_candidates(kw, posts, context="", n=5, min_rel=None):
+    """키워드와 관련도 높은 내 글 후보. 관련 없는 주제(예: 컴퓨터 글 ↔ 경제 글)는 후보에서 제외.
+    많이 쓴 글은 살짝 뒤로 (링크를 고르게 돌리기)"""
+    if min_rel is None:
+        min_rel = float(CONFIG.get("naver_link_min_relevance", 0.4))
     usage = _load_json(LINK_USAGE_PATH)
     q = _bigrams(kw) | _bigrams(context[:300])
     kq = _bigrams(kw)
@@ -552,6 +556,8 @@ def pick_link_candidates(kw, posts, context="", n=5):
         pb = _bigrams(p["title"] + " " + p.get("desc", ""))
         tb = _bigrams(p["title"])
         rel = (len(q & pb) / (len(q) or 1)) + 2 * (len(kq & tb) / (len(kq) or 1))
+        if rel < min_rel:
+            continue
         scored.append((rel - 0.08 * usage.get(p["log_no"], 0) + random.uniform(0, 0.02), p))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [p for _, p in scored[:n]]
@@ -1777,7 +1783,9 @@ class MacroApp:
             if used:
                 self.log("  🔗 내 네이버 글 링크: " + " / ".join(p["title"][:25] for p in used), "success")
             else:
-                self.log("  🔗 관련 있는 내 네이버 글이 없어 링크를 넣지 않음", "dim")
+                self.log("  🔗 AI가 문맥상 맞는 글이 없다고 판단해 링크를 넣지 않음", "dim")
+        elif my_posts:
+            self.log("  🔗 이 키워드와 관련된 내 네이버 글이 없어 링크 생략 (주제가 다르면 넣지 않음)", "dim")
 
         # 이미지
         self.log("🖼️ 이미지 생성/업로드 중...", "info")
