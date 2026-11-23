@@ -16,7 +16,7 @@
 | 그 PC에 필요한 것 | 방법 |
 |---|---|
 | **exe** | 내 PC에서 `build.bat`로 만든 `OneNoteExporter.exe`만 복사 (파이썬 설치 불필요) |
-| **Claude Code** | 매크로 실행 → 설정 → **Claude Code 설치하기** → 뜨는 창에서 브라우저 로그인 → 연결 테스트 |
+| **Claude Code** | 매크로 실행 → 설정 → **Claude Code 설치하기** → 뜨는 창에서 브라우저 로그인 → AI 원고 생성 창에서 로그인 상태 확인 |
 | **OneNote** | 데스크톱 OneNote 설치·로그인 |
 | 엑셀 | 엑셀 파일을 그 PC에 복사 후 `엑셀 파일 선택` |
 | 지침 | 내 PC의 `projects` 폴더를 exe 옆에 같이 복사 (안 하면 기본 프로젝트만 생김) |
