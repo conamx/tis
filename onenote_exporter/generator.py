@@ -37,19 +37,30 @@ def find_claude_cli():
     return None
 
 
-def call_claude_cli(prompt, stop_flag=None, timeout=None):
+def call_claude_cli(prompt, stop_flag=None, timeout=None, system_file=None,
+                    model=None, effort=None, web_search=False):
     """`claude -p` 호출. 프롬프트는 stdin으로 전달(명령줄 길이 제한 회피).
-    --tools "" : 파일 읽기/명령 실행 없이 글만 쓰게 함."""
+    --tools "" : 파일 읽기/명령 실행 없이 글만 쓰게 함.
+    system_file: Claude Code 기본(코딩용) 시스템 프롬프트를 이 파일 내용(지침)으로 교체
+                 → claude.ai 프로젝트에 지침을 넣은 것과 같은 구조, 사용량도 줄어듦."""
     exe = find_claude_cli()
     if not exe:
         raise AIError('Claude Code를 찾지 못했습니다. 설치 후 터미널에서 `claude`를 한 번 실행해 '
                       '로그인하거나, ⚙ 설정에 실행 파일 경로를 넣어주세요.')
     if timeout is None:
         timeout = int(CONFIG.get('claude_timeout_min') or 30) * 60
-    cmd = [exe, '-p', '--output-format', 'json', '--tools', '', '--no-session-persistence']
-    model = (CONFIG.get('claude_model') or '').strip()
+    cmd = [exe, '-p', '--output-format', 'json', '--no-session-persistence']
+    if web_search:
+        cmd += ['--tools', 'WebSearch', '--allowedTools', 'WebSearch']
+    else:
+        cmd += ['--tools', '']
+    model = (model or CONFIG.get('claude_model') or '').strip()
     if model:
         cmd += ['--model', model]
+    if effort:
+        cmd += ['--effort', effort]
+    if system_file:
+        cmd += ['--system-prompt-file', system_file]
 
     env = os.environ.copy()
     # API 키가 환경변수에 있으면 구독 대신 API로 과금되므로 제거
@@ -97,14 +108,36 @@ def call_claude_cli(prompt, stop_flag=None, timeout=None):
 
 
 def generate(project, case_text, stop_flag=None):
-    """프로젝트 지침 + 사건자료 → 원고 원문(`# 1` ~ `# N`)."""
+    """프로젝트 지침 + 사건자료 → 원고 원문(`# 1` ~ `# N`).
+
+    claude.ai 프로젝트와 같은 구조로 보낸다:
+      시스템 프롬프트 = 지침 + 프로젝트 소스 파일 (Claude Code 기본 프롬프트는 쓰지 않음)
+      사용자 메시지   = 사건자료만 (프로젝트 채팅창에 붙여넣던 그대로)"""
     system = project.build_system_prompt()
-    prompt = (
-        '<지침>\n' + system + '\n</지침>\n\n'
-        '아래 사건자료로 위 지침에 따라 원고를 작성하라.\n\n'
-        '<사건자료>\n' + case_text.strip() + '\n</사건자료>'
-    )
-    text = call_claude_cli(prompt, stop_flag=stop_flag)
+    s = project.settings
+    opts = dict(model=(s.get('모델') or '').strip() or None,
+                effort=(s.get('effort') or '').strip() or None,
+                web_search=bool(s.get('웹검색')))
+    fd, sys_path = tempfile.mkstemp(prefix='onenote_guide_', suffix='.md')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(system)
+        try:
+            text = call_claude_cli(case_text.strip(), stop_flag=stop_flag,
+                                   system_file=sys_path, **opts)
+        except AIError as e:
+            # 아주 오래된 Claude Code라 옵션을 모르면 예전 방식(지침을 메시지에 같이)으로 재시도
+            if 'unknown option' not in str(e).lower():
+                raise
+            prompt = ('<지침>\n' + system + '\n</지침>\n\n'
+                      '아래 사건자료로 위 지침에 따라 원고를 작성하라.\n\n'
+                      '<사건자료>\n' + case_text.strip() + '\n</사건자료>')
+            text = call_claude_cli(prompt, stop_flag=stop_flag, **opts)
+    finally:
+        try:
+            os.remove(sys_path)
+        except OSError:
+            pass
     # 혹시 원고 앞에 설명이 붙으면 첫 '# 1' 앞부분은 버린다
     m = re.search(r'(?m)^#[ \t]+1[ \t]*$', text)
     return text[m.start():] if m else text
