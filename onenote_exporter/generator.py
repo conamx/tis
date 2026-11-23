@@ -110,6 +110,26 @@ def generate(project, case_text, stop_flag=None):
     return text[m.start():] if m else text
 
 
+def open_installer():
+    """Claude Code 설치 + 로그인 창을 띄운다 (Windows PowerShell).
+    설치가 끝나면 같은 창에서 claude 가 실행되어 브라우저 로그인 화면이 열린다."""
+    import sys
+    if not sys.platform.startswith('win'):
+        raise AIError('Windows에서만 자동 설치를 지원합니다.')
+    script = (
+        "Write-Host 'Claude Code 설치 중... (1~2분)' -ForegroundColor Cyan; "
+        "irm https://claude.ai/install.ps1 | iex; "
+        "$exe = Join-Path $env:USERPROFILE '.local\\bin\\claude.exe'; "
+        "if (-not (Test-Path $exe)) { $exe = 'claude' }; "
+        "Write-Host ''; "
+        "Write-Host '설치 완료! 이어서 로그인합니다. 브라우저가 열리면 Claude 계정으로 로그인하세요.' -ForegroundColor Green; "
+        "Write-Host '로그인 후 이 창은 닫아도 됩니다. 매크로에서 [Claude 연결 테스트]를 눌러 확인하세요.' -ForegroundColor Green; "
+        "& $exe"
+    )
+    subprocess.Popen(['powershell', '-NoExit', '-ExecutionPolicy', 'Bypass', '-Command', script],
+                     creationflags=getattr(subprocess, 'CREATE_NEW_CONSOLE', 0))
+
+
 def label():
     model = (CONFIG.get('claude_model') or '').strip()
     return f'Claude Code ({model})' if model else 'Claude Code'

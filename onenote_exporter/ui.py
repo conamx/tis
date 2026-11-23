@@ -873,6 +873,9 @@ class OneNoteExporterGUI:
             p.build_system_prompt()
         except Exception as e:
             messagebox.showerror('지침 오류', str(e)); return
+        if not generator.find_claude_cli():
+            self._offer_install()
+            return
 
         jobs = []   # (표시이름, 사건자료 텍스트, Case 또는 None)
         if self.source_var.get() == 'excel':
@@ -999,6 +1002,22 @@ class OneNoteExporterGUI:
         if self.cases:
             self._fill_cases()
 
+    def _install_claude(self):
+        try:
+            generator.open_installer()
+            self._log('Claude Code 설치 창을 열었습니다. 설치·로그인 후 ⚙ 설정 → 연결 테스트', 'inf')
+        except Exception as e:
+            messagebox.showerror('설치', f'설치 창을 열지 못했습니다: {e}\n\n'
+                                 'PowerShell에서 직접 실행하세요:\nirm https://claude.ai/install.ps1 | iex\n그 다음: claude')
+
+    def _offer_install(self):
+        if messagebox.askyesno('Claude Code 없음',
+                               '이 PC에서 Claude Code를 찾지 못했습니다.\n\n'
+                               '지금 설치할까요? (무료, 1~2분)\n'
+                               '설치 창이 뜨고, 끝나면 브라우저에서 Claude 계정으로 로그인하면 됩니다.\n\n'
+                               '※ 이미 설치했다면 ⚙ 설정에서 실행 파일 경로를 지정하세요.'):
+            self._install_claude()
+
     # ── 설정 ──
 
     def _open_settings(self):
@@ -1045,7 +1064,12 @@ class OneNoteExporterGUI:
 
         tk.Button(trow, text='Claude 연결 테스트', command=test, font=(F, 9), bg=C['light'],
                   relief=tk.FLAT, padx=10, pady=3, cursor='hand2').pack(side=tk.LEFT)
+        tk.Button(trow, text='Claude Code 설치하기', command=self._install_claude, font=(F, 9),
+                  bg=C['light'], relief=tk.FLAT, padx=10, pady=3, cursor='hand2'
+                  ).pack(side=tk.LEFT, padx=(4, 0))
         tlabel.pack(side=tk.LEFT, padx=8)
+        tk.Label(win, text='※ Claude Code가 없는 PC: [Claude Code 설치하기] → 뜨는 창에서 로그인 → 연결 테스트',
+                 font=(F, 8), bg=C['white'], fg='#94a3b8').pack(anchor='w', pady=(4, 0))
 
         tk.Label(win, text='[BLUE]문장[/BLUE] 표시 처리', font=(F, 9, 'bold'), bg=C['white'],
                  fg=C['text']).pack(anchor='w', pady=(14, 2))
