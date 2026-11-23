@@ -15,7 +15,9 @@ from app_config import CONFIG, ACCOUNT2_DIR
 
 
 class AIError(Exception):
-    pass
+    def __init__(self, msg, partial=''):
+        super().__init__(msg)
+        self.partial = partial   # 실패 전까지 써진 글 (버리지 않고 저장용)
 
 
 def find_claude_cli():
@@ -84,7 +86,8 @@ def call_claude_cli(prompt, stop_flag=None, timeout=None, system_file=None,
     if timeout is None:
         timeout = int(CONFIG.get('claude_timeout_min') or 30) * 60
     cmd = [exe, '-p', '--output-format', 'stream-json', '--verbose',
-           '--include-partial-messages', '--no-session-persistence']
+           '--include-partial-messages', '--no-session-persistence',
+           '--strict-mcp-config']   # PC에 깔린 MCP 서버 도구 설명이 따라붙지 않게
     if web_search:
         cmd += ['--tools', 'WebSearch', '--allowedTools', 'WebSearch']
     else:
@@ -129,10 +132,10 @@ def call_claude_cli(prompt, stop_flag=None, timeout=None, system_file=None,
             line = ''
         if stop_flag and stop_flag.is_set():
             proc.kill()
-            raise AIError('사용자 중지')
+            raise AIError('사용자 중지', ''.join(text))
         if time.time() - started > timeout:
             proc.kill()
-            raise AIError(f'Claude Code 응답 시간 초과 ({timeout // 60}분)')
+            raise AIError(f'Claude Code 응답 시간 초과 ({timeout // 60}분)', ''.join(text))
         if line is None:
             break
         if line:
@@ -161,7 +164,8 @@ def call_claude_cli(prompt, stop_flag=None, timeout=None, system_file=None,
 
     if result is None:
         msg = ((err_buf[0] if err_buf else '') or ''.join(raw_tail)).strip()[:300]
-        raise AIError(f'Claude Code 실행 실패 (코드 {proc.returncode}): {msg or "출력 없음"}')
+        raise AIError(f'Claude Code 실행 실패 (코드 {proc.returncode}): {msg or "출력 없음"}',
+                      ''.join(text))
     out = result.get('result') or ''.join(text)
     if result.get('is_error') or result.get('subtype') != 'success' or not out.strip():
         hint = ''
@@ -170,7 +174,8 @@ def call_claude_cli(prompt, stop_flag=None, timeout=None, system_file=None,
             hint = ' → 로그인이 필요합니다'
         elif 'limit' in low:
             hint = ' → 사용량 한도에 걸렸습니다. 나중에 다시 시도하세요'
-        raise AIError(f'Claude Code 오류: {out[:200] or result.get("subtype")}{hint}')
+        raise AIError(f'Claude Code 오류: {out[:200] or result.get("subtype")}{hint}',
+                      ''.join(text))
     return out
 
 

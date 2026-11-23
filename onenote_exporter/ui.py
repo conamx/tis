@@ -1195,6 +1195,13 @@ class OneNoteExporterGUI:
                                               account=account, progress=on_progress)
                 except Exception as e:
                     log(f'{tag} 실패: {e}', 'err')
+                    partial = getattr(e, 'partial', '')
+                    if partial and len(partial) > 200:
+                        safe = (case.key if case else '직접입력').replace('/', '_').replace('\\', '_')
+                        pp = os.path.join(out_dir, datetime.now().strftime('%H%M%S') + f'_{safe}_미완성.md')
+                        with open(pp, 'w', encoding='utf-8') as f:
+                            f.write(partial)
+                        log(f'  써진 부분까지 저장: {os.path.basename(pp)}', 'warn')
                     self._ui(lambda key=key: self._prog_clear(key))
                     finish(False)
                     if '중지' in str(e) or '한도' in str(e) or '로그인' in str(e):
