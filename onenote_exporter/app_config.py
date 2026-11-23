@@ -21,6 +21,8 @@ CONFIG_PATH   = os.path.join(APP_DIR, 'config.json')
 PROJECTS_DIR  = os.path.join(APP_DIR, 'projects')
 OUTPUT_DIR    = os.path.join(APP_DIR, 'output')
 USAGE_LOG     = os.path.join(APP_DIR, '사용기록.csv')
+# 두 번째 Claude 계정의 로그인 정보가 저장되는 폴더 (첫 번째 계정은 Claude Code 기본 위치)
+ACCOUNT2_DIR  = os.path.join(APP_DIR, 'claude_account2')
 
 DEFAULTS = {
     'claude_model': '',         # 비우면 Claude Code 기본값. 예: sonnet / opus
@@ -28,8 +30,8 @@ DEFAULTS = {
     'claude_timeout_min': 30,   # 사례 1건(원고 10편) 최대 대기 시간
     'excel_path': '',
     'excel_used_check': True,   # 엑셀 '사용체크' 열에 표시가 있으면 쓴 사례로 본다
-    'blue_mode': 'keep',        # [BLUE] 표시: keep(글자 그대로) / color(파란 글씨) / strip(표시 제거)
     'auto_export': True,        # 원고 생성 후 바로 OneNote로 내보내기
+    'account': 1,               # 원고 작성에 쓸 Claude 계정 (1 또는 2)
     'last_project': '',
 }
 

@@ -1,8 +1,7 @@
 # generator.py
-"""PC에 설치·로그인된 Claude Code(`claude -p`)로 원고 생성.
+"""PC에 설치·로그인된 Claude Code(`claude -p`)로 원고 생성. (티스토리 매크로와 같은 방식)
 
-Claude 구독(Pro/Max) 사용량으로 처리되므로 API 키·별도 결제가 필요 없다.
-(티스토리 매크로와 같은 방식)
+계정 2개: 계정 1은 Claude Code 기본 로그인, 계정 2는 claude_account2 폴더에 따로 로그인.
 """
 import json
 import os
@@ -12,7 +11,7 @@ import tempfile
 import re
 import time
 
-from app_config import CONFIG
+from app_config import CONFIG, ACCOUNT2_DIR
 
 
 class AIError(Exception):
@@ -38,7 +37,7 @@ def find_claude_cli():
 
 
 def call_claude_cli(prompt, stop_flag=None, timeout=None, system_file=None,
-                    model=None, effort=None, web_search=False):
+                    model=None, effort=None, web_search=False, account=None):
     """`claude -p` 호출. 프롬프트는 stdin으로 전달(명령줄 길이 제한 회피).
     --tools "" : 파일 읽기/명령 실행 없이 글만 쓰게 함.
     system_file: Claude Code 기본(코딩용) 시스템 프롬프트를 이 파일 내용(지침)으로 교체
@@ -66,6 +65,12 @@ def call_claude_cli(prompt, stop_flag=None, timeout=None, system_file=None,
     # API 키가 환경변수에 있으면 구독 대신 API로 과금되므로 제거
     env.pop('ANTHROPIC_API_KEY', None)
     env.pop('ANTHROPIC_AUTH_TOKEN', None)
+    # 계정 2: 로그인 정보를 별도 폴더에 두고 그 폴더로 실행
+    if int(account or CONFIG.get('account') or 1) == 2:
+        os.makedirs(ACCOUNT2_DIR, exist_ok=True)
+        env['CLAUDE_CONFIG_DIR'] = ACCOUNT2_DIR
+    else:
+        env.pop('CLAUDE_CONFIG_DIR', None)
     # 원고 10편은 길어서 기본 출력 한도에 잘릴 수 있음 → 한도를 넉넉히
     env.setdefault('CLAUDE_CODE_MAX_OUTPUT_TOKENS', '64000')
     flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)  # 윈도우에서 검은 창 안 뜨게
@@ -141,6 +146,26 @@ def generate(project, case_text, stop_flag=None):
     # 혹시 원고 앞에 설명이 붙으면 첫 '# 1' 앞부분은 버린다
     m = re.search(r'(?m)^#[ \t]+1[ \t]*$', text)
     return text[m.start():] if m else text
+
+
+def open_login(account):
+    """해당 계정으로 Claude Code 로그인 창을 띄운다."""
+    import sys
+    if not sys.platform.startswith('win'):
+        raise AIError('Windows에서만 지원합니다.')
+    exe = find_claude_cli()
+    if not exe:
+        raise AIError('Claude Code가 설치되어 있지 않습니다. 먼저 [Claude Code 설치하기]를 누르세요.')
+    pre = ''
+    if int(account) == 2:
+        os.makedirs(ACCOUNT2_DIR, exist_ok=True)
+        pre = "$env:CLAUDE_CONFIG_DIR = '" + ACCOUNT2_DIR.replace("'", "''") + "'; "
+    script = (pre +
+              f"Write-Host '계정 {account} 로그인: 브라우저가 열리면 계정 {account}로 로그인하세요.' -ForegroundColor Green; "
+              "Write-Host '이미 로그인된 상태면 /login 을 입력해 계정을 바꿀 수 있습니다. 끝나면 창을 닫으세요.' -ForegroundColor Green; "
+              "& '" + exe.replace("'", "''") + "'")
+    subprocess.Popen(['powershell', '-NoExit', '-ExecutionPolicy', 'Bypass', '-Command', script],
+                     creationflags=getattr(subprocess, 'CREATE_NEW_CONSOLE', 0))
 
 
 def open_installer():

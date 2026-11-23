@@ -30,14 +30,7 @@ def _body_top_y(title):
 
 
 _ONE_NS = 'http://schemas.microsoft.com/office/onenote/2013/onenote'
-_INLINE_TOKEN = re.compile(r'\*\*|\*|\[/?BLUE\]')
-
-# [BLUE]문장[/BLUE] 처리 방식 — UI 설정에서 바꿈
-#   'keep' : 표시를 글자 그대로 둔다 (체크용, 기존 동작)
-#   'color': 표시를 지우고 그 문장을 파란 글씨로
-#   'strip': 표시만 지운다
-BLUE_MODE  = 'keep'
-BLUE_COLOR = '#0000FF'
+_INLINE_TOKEN = re.compile(r'\*\*|\*')
 
 
 def _esc(t):
@@ -50,16 +43,13 @@ def _cdata(s):
 
 def _inline_runs(text, force_bold=False):
     """한 문단의 인라인 표기를 (글자, 볼드, 이탤릭, 색없음) 조각으로 분해.
-    **볼드**, *이탤릭* 지원. [BLUE] 표시는 BLUE_MODE에 따라 처리. 짝이 안 맞는 기호는 화면에 남지 않게 버린다."""
+    **볼드**, *이탤릭* 지원. ([BLUE] 표시는 체크용이라 건드리지 않고 글자 그대로 둔다) 짝이 안 맞는 기호는 화면에 남지 않게 버린다."""
     tokens, pos = [], 0
     for m in _INLINE_TOKEN.finditer(text):
         if m.start() > pos:
             tokens.append(('t', text[pos:m.start()]))
         v = m.group()
-        if v in ('[BLUE]', '[/BLUE]') and BLUE_MODE == 'keep':
-            tokens.append(('t', v))
-        else:
-            tokens.append(('m', v))
+        tokens.append(('m', v))
         pos = m.end()
     if pos < len(text):
         tokens.append(('t', text[pos:]))
@@ -75,10 +65,6 @@ def _inline_runs(text, force_bold=False):
             if not drop_b: bold = not bold
         elif v == '*':
             if not drop_i: ital = not ital
-        elif v == '[BLUE]':
-            blue = (BLUE_MODE == 'color')
-        elif v == '[/BLUE]':
-            blue = False
     return runs
 
 
@@ -86,7 +72,6 @@ def _run_html(text, size, bold, ital, blue):
     st = [f'font-size:{size:.1f}pt']
     if bold: st.append('font-weight:bold')
     if ital: st.append('font-style:italic')
-    if blue: st.append(f'color:{BLUE_COLOR}')
     return f"<span style='{';'.join(st)}'>{_esc(text)}</span>"
 
 
