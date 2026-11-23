@@ -564,9 +564,9 @@ class OneNoteExporterGUI:
     # AI 원고 생성 창
     # ══════════════════════════════════════════════════════════
 
-    def _card(self, parent, title=None):
+    def _card(self, parent, title=None, side=tk.TOP):
         f = tk.Frame(parent, bg=C['white'], highlightbackground=C['light'], highlightthickness=1)
-        f.pack(fill=tk.X, padx=12, pady=(8, 0))
+        f.pack(fill=tk.X, padx=12, pady=(8, 0), side=side)
         if title:
             top = tk.Frame(f, bg=C['bg'])
             top.pack(fill=tk.X, padx=1, pady=1)
@@ -579,56 +579,116 @@ class OneNoteExporterGUI:
         return tk.Button(parent, text=text, command=cmd, font=(F, 9), bg=C['light'],
                          fg=C['text'], relief=tk.FLAT, padx=12, pady=4, cursor='hand2')
 
+    def _dropdown(self, parent, width=14, command=None):
+        """ttk 콤보박스 대신 쓰는 깔끔한 드롭다운 (설정창과 같은 납작한 스타일)"""
+        var = tk.StringVar()
+        mb = tk.Menubutton(parent, text='', font=(F, 9), bg=C['bg'], fg=C['text'],
+                           activebackground=C['light'], activeforeground=C['text'],
+                           relief=tk.FLAT, bd=0, padx=10, pady=5, width=width, anchor='w',
+                           cursor='hand2', highlightthickness=0, direction='below')
+        menu = tk.Menu(mb, tearoff=0, font=(F, 9), bg=C['white'], fg=C['text'], bd=0,
+                       activebackground=C['accent'], activeforeground='white')
+        mb['menu'] = menu
+
+        def _show(*_):
+            mb.config(text=f'{var.get()}  ▾')
+        var.trace_add('write', _show)
+
+        def set_values(values):
+            menu.delete(0, tk.END)
+            for v in values:
+                menu.add_command(label=v, command=lambda v=v: (var.set(v), command and command()))
+        mb.var, mb.set_values = var, set_values
+        _show()
+        return mb
+
+    def _segment(self, parent, var, options, command=None):
+        """버튼처럼 생긴 라디오 (선택된 칸만 연한 파랑)"""
+        f = tk.Frame(parent, bg=C['light'], padx=1, pady=1)
+        for val, text in options:
+            tk.Radiobutton(f, text=text, variable=var, value=val, command=command,
+                           indicatoron=0, font=(F, 9), bg=C['white'], fg=C['subtext'],
+                           selectcolor='#dbeafe', activebackground=C['bg'], relief=tk.FLAT,
+                           bd=0, offrelief=tk.FLAT, padx=14, pady=4, cursor='hand2'
+                           ).pack(side=tk.LEFT, padx=(0, 1))
+        return f
+
     def _open_ai_window(self):
         if self.ai_win and self.ai_win.winfo_exists():
             self.ai_win.deiconify(); self.ai_win.lift(); return
         win = tk.Toplevel(self.root)
         self.ai_win = win
         win.title('AI 원고 생성')
-        win.geometry('820x700')
-        win.minsize(640, 520)
+        win.geometry('820x720')
+        win.minsize(640, 540)
         win.configure(bg=C['bg'])
         win.protocol('WM_DELETE_WINDOW', win.withdraw)
 
-        # 프로젝트
-        pf = self._card(win)
-        tk.Label(pf, text='프로젝트', font=(F, 9, 'bold'), bg=C['white'],
-                 fg=C['subtext']).grid(row=0, column=0, padx=(12, 4), pady=8, sticky='w')
-        self.project_var = tk.StringVar()
-        self.project_cb = ttk.Combobox(pf, textvariable=self.project_var, state='readonly',
-                                       width=24, font=(F, 9))
-        self.project_cb.grid(row=0, column=1, padx=(0, 6), pady=8)
-        self.project_cb.bind('<<ComboboxSelected>>', lambda e: self._on_project())
-        self._small_btn(pf, '지침 폴더', self._open_project_folder).grid(row=0, column=2, padx=2)
-        self._small_btn(pf, '새 프로젝트', self._new_project).grid(row=0, column=3, padx=2)
-        self._small_btn(pf, '새로고침', self._refresh_projects).grid(row=0, column=4, padx=2)
-        self.project_info = tk.Label(pf, text='', font=(F, 8), bg=C['white'], fg='#94a3b8')
-        self.project_info.grid(row=0, column=5, padx=8, sticky='w')
+        # ── 프로젝트 / 입력 / 계정 ──
+        card = self._card(win, '프로젝트')
+        for t, cmd in [('새로고침', self._refresh_projects), ('새 프로젝트', self._new_project),
+                       ('지침 폴더', self._open_project_folder)]:
+            tk.Button(card._top, text=t, command=cmd, font=(F, 8), bg=C['bg'], fg=C['subtext'],
+                      activebackground=C['light'], relief=tk.FLAT, bd=0, padx=8,
+                      cursor='hand2').pack(side=tk.RIGHT, padx=(0, 6))
+        body = tk.Frame(card, bg=C['white'])
+        body.pack(fill=tk.X, padx=12, pady=(6, 10))
 
-        tk.Frame(pf, bg=C['light'], height=1).grid(row=1, column=0, columnspan=7,
-                                                    sticky='ew', padx=8)
-        tk.Label(pf, text='입력', font=(F, 9, 'bold'), bg=C['white'],
-                 fg=C['subtext']).grid(row=2, column=0, padx=(12, 4), pady=8, sticky='w')
+        def label(r, text):
+            tk.Label(body, text=text, font=(F, 9), bg=C['white'], fg=C['subtext'], width=7,
+                     anchor='w').grid(row=r, column=0, sticky='w', pady=3)
+
+        label(0, '프로젝트')
+        self.project_dd = self._dropdown(body, width=26, command=self._on_project)
+        self.project_var = self.project_dd.var
+        self.project_dd.grid(row=0, column=1, sticky='w', pady=3)
+        self.project_info = tk.Label(body, text='', font=(F, 8), bg=C['white'], fg='#94a3b8')
+        self.project_info.grid(row=0, column=2, sticky='w', padx=10)
+
+        label(1, '입력')
         self.source_var = tk.StringVar(value='excel')
-        sf = tk.Frame(pf, bg=C['white'])
-        sf.grid(row=2, column=1, columnspan=3, sticky='w')
-        for val, text in [('excel', '엑셀 사례'), ('direct', '직접 입력')]:
-            tk.Radiobutton(sf, text=text, variable=self.source_var, value=val,
-                           command=self._on_source, font=(F, 9), bg=C['white'],
-                           activebackground=C['white'], selectcolor=C['white']
-                           ).pack(side=tk.LEFT, padx=(0, 10))
-        tk.Label(pf, text='계정', font=(F, 9, 'bold'), bg=C['white'],
-                 fg=C['subtext']).grid(row=2, column=4, padx=(4, 4), sticky='e')
-        self.account_var = tk.IntVar(value=int(CONFIG.get('account') or 1))
-        af = tk.Frame(pf, bg=C['white'])
-        af.grid(row=2, column=5, sticky='w')
-        for n in (1, 2):
-            tk.Radiobutton(af, text=f'계정 {n}', variable=self.account_var, value=n,
-                           font=(F, 9), bg=C['white'], activebackground=C['white'],
-                           selectcolor=C['white']).pack(side=tk.LEFT, padx=(0, 6))
-        pf.columnconfigure(6, weight=1)
+        self._segment(body, self.source_var, [('excel', '엑셀 사례'), ('direct', '직접 입력')],
+                      self._on_source).grid(row=1, column=1, sticky='w', pady=3)
 
-        # 엑셀 / 직접 입력 영역
+        label(2, '계정')
+        acc = CONFIG.get('account') or 1
+        self.account_var = tk.StringVar(value=str(acc))
+        self._segment(body, self.account_var, [('1', '계정 1'), ('2', '계정 2'),
+                                               ('both', '1 + 2 동시')]
+                      ).grid(row=2, column=1, sticky='w', pady=3)
+        tk.Label(body, text='동시: 두 계정이 사례를 나눠서 함께 작성', font=(F, 8),
+                 bg=C['white'], fg='#94a3b8').grid(row=2, column=2, sticky='w', padx=10)
+
+        # ── 실행 ──
+        run = tk.Frame(win, bg=C['bg'])
+        run.pack(fill=tk.X, padx=12, pady=10, side=tk.BOTTOM)
+        tk.Button(run, text='결과 폴더', command=lambda: app_config.open_folder(app_config.OUTPUT_DIR),
+                  font=(F, 9), bg=C['light'], fg=C['text'], relief=tk.FLAT, padx=12, pady=6,
+                  cursor='hand2').pack(side=tk.LEFT)
+        self.stop_btn = tk.Button(run, text='중지', command=self._stop_generate, font=(F, 10),
+                                  bg=C['light'], fg=C['subtext'], relief=tk.FLAT, padx=16,
+                                  pady=6, cursor='hand2', state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        self.gen_btn = _btn(run, '원고 생성', self._start_generate, bg=C['accent'], fs=10,
+                            px=28, py=7)
+        self.gen_btn.pack(side=tk.RIGHT)
+
+        # ── 진행 상황 ──
+        lc = self._card(win, '진행 상황', side=tk.BOTTOM)
+        self.auto_export_var = tk.BooleanVar(value=CONFIG.get('auto_export', True))
+        tk.Checkbutton(lc._top, text='생성 후 바로 OneNote로 내보내기',
+                       variable=self.auto_export_var, font=(F, 8), bg=C['bg'],
+                       fg=C['subtext'], activebackground=C['bg'], selectcolor=C['white']
+                       ).pack(side=tk.RIGHT, padx=8)
+        self.ai_log = tk.Text(lc, font=(F, 9), bg=C['white'], fg=C['subtext'], relief=tk.FLAT,
+                              padx=12, pady=6, height=3, state=tk.DISABLED, wrap=tk.WORD,
+                              highlightthickness=0)
+        self.ai_log.pack(fill=tk.X, padx=1, pady=(0, 1))
+        for tag, col in [('ok', C['green']), ('err', C['red']), ('inf', C['subtext']),
+                         ('warn', C['orange'])]:
+            self.ai_log.tag_configure(tag, foreground=col)
+
+        # ── 엑셀 사례 ──
         self.src_area = tk.Frame(win, bg=C['bg'])
         self.src_area.pack(fill=tk.BOTH, expand=True)
 
@@ -641,58 +701,64 @@ class OneNoteExporterGUI:
                  fg=C['subtext']).pack(side=tk.LEFT, padx=12, pady=6)
         self.excel_lbl = tk.Label(top, text='', font=(F, 8), bg=C['bg'], fg='#94a3b8')
         self.excel_lbl.pack(side=tk.LEFT, padx=4)
-        tk.Button(top, text='엑셀 파일 선택', command=self._pick_excel, font=(F, 9),
-                  bg=C['light'], fg=C['text'], relief=tk.FLAT, padx=10, pady=2,
-                  cursor='hand2').pack(side=tk.RIGHT, padx=8)
+        tk.Button(top, text='엑셀 파일 선택', command=self._pick_excel, font=(F, 8),
+                  bg=C['bg'], fg=C['subtext'], activebackground=C['light'], relief=tk.FLAT,
+                  bd=0, padx=8, cursor='hand2').pack(side=tk.RIGHT, padx=6)
 
-        r2 = tk.Frame(ef, bg=C['white'])
-        r2.pack(fill=tk.X, padx=12, pady=(6, 4))
-        tk.Label(r2, text='시트', font=(F, 9), bg=C['white'], fg=C['subtext']).pack(side=tk.LEFT)
-        self.sheet_var = tk.StringVar()
-        self.sheet_cb = ttk.Combobox(r2, textvariable=self.sheet_var, state='readonly',
-                                     width=13, font=(F, 9))
-        self.sheet_cb.pack(side=tk.LEFT, padx=(4, 10))
-        self.sheet_cb.bind('<<ComboboxSelected>>', lambda e: self._on_sheet())
-        tk.Label(r2, text='분류', font=(F, 9), bg=C['white'], fg=C['subtext']).pack(side=tk.LEFT)
-        self.cat_var = tk.StringVar(value='(전체)')
-        self.cat_cb = ttk.Combobox(r2, textvariable=self.cat_var, state='readonly',
-                                   width=15, font=(F, 9))
-        self.cat_cb.pack(side=tk.LEFT, padx=(4, 10))
-        self.cat_cb.bind('<<ComboboxSelected>>', lambda e: self._fill_cases())
+        flt = tk.Frame(ef, bg=C['white'])
+        flt.pack(fill=tk.X, padx=12, pady=(8, 6))
+        tk.Label(flt, text='시트', font=(F, 9), bg=C['white'], fg=C['subtext']).pack(side=tk.LEFT)
+        self.sheet_dd = self._dropdown(flt, width=12, command=self._on_sheet)
+        self.sheet_var = self.sheet_dd.var
+        self.sheet_dd.pack(side=tk.LEFT, padx=(6, 14))
+        tk.Label(flt, text='분류', font=(F, 9), bg=C['white'], fg=C['subtext']).pack(side=tk.LEFT)
+        self.cat_dd = self._dropdown(flt, width=14, command=self._fill_cases)
+        self.cat_var = self.cat_dd.var
+        self.cat_var.set('(전체)')
+        self.cat_dd.pack(side=tk.LEFT, padx=(6, 14))
         self.unused_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(r2, text='안 쓴 사례만', variable=self.unused_var,
+        tk.Checkbutton(flt, text='안 쓴 사례만', variable=self.unused_var,
                        command=self._fill_cases, font=(F, 9), bg=C['white'],
                        fg=C['subtext'], activebackground=C['white'], selectcolor=C['white']
                        ).pack(side=tk.LEFT)
-        self.case_count = tk.Label(r2, text='', font=(F, 8), bg=C['white'], fg='#94a3b8')
+        self.case_count = tk.Label(flt, text='', font=(F, 8), bg=C['white'], fg='#94a3b8')
         self.case_count.pack(side=tk.RIGHT)
 
-        tw = tk.Frame(ef, bg=C['white'])
-        tw.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 4))
-        cols = ('crime', 'r1', 'r2', 'summary')
-        self.case_tree = ttk.Treeview(tw, columns=cols, show='headings', height=8,
-                                      selectmode='extended')
-        for c, t, w in [('crime', '범죄명', 120), ('r1', '결과', 100),
-                        ('r2', '결과2', 140), ('summary', '요약', 360)]:
-            self.case_tree.heading(c, text=t)
-            self.case_tree.column(c, width=w, anchor='w')
-        vsb = ttk.Scrollbar(tw, orient='vertical', command=self.case_tree.yview)
-        self.case_tree.configure(yscrollcommand=vsb.set)
-        self.case_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.case_tree.tag_configure('used', foreground='#94a3b8')
+        tk.Frame(ef, bg=C['light'], height=1).pack(fill=tk.X)
+        lw = tk.Frame(ef, bg=C['white'])
+        lw.pack(fill=tk.BOTH, expand=True)
+        sb = tk.Scrollbar(lw)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.case_canvas = tk.Canvas(lw, bg=C['white'], yscrollcommand=sb.set,
+                                     highlightthickness=0)
+        self.case_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.config(command=self.case_canvas.yview)
+        self.case_frame = tk.Frame(self.case_canvas, bg=C['white'])
+        cw = self.case_canvas.create_window((0, 0), window=self.case_frame, anchor='nw')
+        self.case_frame.bind('<Configure>', lambda e: self.case_canvas.config(
+            scrollregion=self.case_canvas.bbox('all')))
+        self.case_canvas.bind('<Configure>', lambda e: self.case_canvas.itemconfig(cw, width=e.width))
+        wheel = lambda e: self.case_canvas.yview_scroll(-1 * (e.delta // 120), 'units')
+        self.case_canvas.bind('<Enter>', lambda e: self.case_canvas.bind_all('<MouseWheel>', wheel))
+        self.case_canvas.bind('<Leave>', lambda e: self.case_canvas.unbind_all('<MouseWheel>'))
+        self.case_checks = []
 
         bot = tk.Frame(ef, bg=C['bg'])
         bot.pack(fill=tk.X, padx=1, pady=1)
         tk.Label(bot, text='위에서', font=(F, 9), bg=C['bg'], fg=C['subtext']
                  ).pack(side=tk.LEFT, padx=(12, 4), pady=6)
-        self.pick_n = tk.Spinbox(bot, from_=1, to=50, width=3, font=(F, 9))
-        self.pick_n.delete(0, tk.END); self.pick_n.insert(0, '1')
-        self.pick_n.pack(side=tk.LEFT)
-        tk.Button(bot, text='개 선택', command=self._auto_pick, font=(F, 9), bg=C['light'],
-                  fg=C['text'], relief=tk.FLAT, padx=10, pady=3, cursor='hand2'
-                  ).pack(side=tk.LEFT, padx=6)
+        self.pick_n = tk.Entry(bot, width=3, font=(F, 9), relief=tk.FLAT, bg=C['white'],
+                               justify='center')
+        self.pick_n.insert(0, '1')
+        self.pick_n.pack(side=tk.LEFT, ipady=3)
+        for t, cmd in [('개 선택', self._auto_pick), ('✗ 해제', self._clear_pick)]:
+            tk.Button(bot, text=t, command=cmd, font=(F, 9), bg=C['light'], fg=C['text'],
+                      relief=tk.FLAT, padx=12, pady=4, cursor='hand2'
+                      ).pack(side=tk.LEFT, padx=(6, 0))
+        self.pick_lbl = tk.Label(bot, text='', font=(F, 9), bg=C['bg'], fg=C['accent'])
+        self.pick_lbl.pack(side=tk.RIGHT, padx=12)
 
+        # ── 직접 입력 ──
         df = tk.Frame(self.src_area, bg=C['white'], highlightbackground=C['light'],
                       highlightthickness=1)
         self.direct_frame = df
@@ -707,31 +773,6 @@ class OneNoteExporterGUI:
                                                     highlightthickness=0)
         self.direct_txt.pack(fill=tk.BOTH, expand=True, padx=1, pady=(0, 1))
 
-        # 실행
-        run = tk.Frame(win, bg=C['bg'])
-        run.pack(fill=tk.X, padx=12, pady=(8, 0))
-        self.auto_export_var = tk.BooleanVar(value=CONFIG.get('auto_export', True))
-        tk.Checkbutton(run, text='생성 후 바로 OneNote로 내보내기', variable=self.auto_export_var,
-                       font=(F, 9), bg=C['bg'], fg=C['subtext'], activebackground=C['bg'],
-                       selectcolor=C['white']).pack(side=tk.LEFT)
-        self.stop_btn = _btn(run, '중지', self._stop_generate, bg=C['gray'], fs=10, px=16, py=7)
-        self.stop_btn.pack(side=tk.RIGHT, padx=(6, 0))
-        self.stop_btn.config(state=tk.DISABLED)
-        self.gen_btn = _btn(run, '원고 생성', self._start_generate, bg=C['accent'], fs=10,
-                            px=24, py=7)
-        self.gen_btn.pack(side=tk.RIGHT)
-        tk.Button(run, text='결과 폴더', command=lambda: app_config.open_folder(app_config.OUTPUT_DIR),
-                  font=(F, 9), bg=C['light'], fg=C['text'], relief=tk.FLAT, padx=12, pady=5,
-                  cursor='hand2').pack(side=tk.RIGHT, padx=6)
-
-        self.ai_log = scrolledtext.ScrolledText(
-            win, font=('Consolas', 8), bg=C['log_bg'], fg=C['log_fg'],
-            relief=tk.FLAT, padx=8, pady=4, state=tk.DISABLED, height=6)
-        self.ai_log.pack(fill=tk.X, padx=12, pady=(8, 10))
-        for tag, col in [('ok', C['log_ok']), ('err', C['log_err']),
-                         ('inf', C['log_inf']), ('warn', '#fbbf24')]:
-            self.ai_log.tag_configure(tag, foreground=col)
-
         self._refresh_projects()
         if CONFIG.get('excel_path') and os.path.exists(CONFIG['excel_path']):
             win.after(200, lambda: self._load_excel(CONFIG['excel_path']))
@@ -743,9 +784,9 @@ class OneNoteExporterGUI:
         self._log(msg, level)
         if not (self.ai_win and self.ai_win.winfo_exists()):
             return
-        ts = datetime.now().strftime('%H:%M:%S')
+        ts = datetime.now().strftime('%H:%M')
         self.ai_log.config(state=tk.NORMAL)
-        self.ai_log.insert(tk.END, f'[{ts}] {msg}\n', level)
+        self.ai_log.insert(tk.END, f'{ts}  {msg}\n', level)
         self.ai_log.see(tk.END)
         self.ai_log.config(state=tk.DISABLED)
 
@@ -758,7 +799,7 @@ class OneNoteExporterGUI:
     def _refresh_projects(self):
         self.projects = proj.list_projects()
         names = [p.name for p in self.projects]
-        self.project_cb['values'] = names
+        self.project_dd.set_values(names)
         last = CONFIG.get('last_project')
         if self.project_var.get() in names:
             pass
@@ -850,7 +891,7 @@ class OneNoteExporterGUI:
         app_config.save_config()
         total = sum(len(v) for v in self.cases.values())
         self.excel_lbl.config(text=f'{os.path.basename(path)} · 사례 {total}건')
-        self.sheet_cb['values'] = list(self.cases.keys())
+        self.sheet_dd.set_values(list(self.cases.keys()))
         if self.sheet_var.get() not in self.cases:
             self.sheet_var.set(next(iter(self.cases)))
         self._on_sheet()
@@ -858,7 +899,7 @@ class OneNoteExporterGUI:
     def _on_sheet(self):
         cases = self.cases.get(self.sheet_var.get(), [])
         cats = sorted({c.category for c in cases if c.category})
-        self.cat_cb['values'] = ['(전체)'] + cats
+        self.cat_dd.set_values(['(전체)'] + cats)
         if self.cat_var.get() not in cats:
             self.cat_var.set('(전체)')
         self._fill_cases()
@@ -871,12 +912,13 @@ class OneNoteExporterGUI:
     def _fill_cases(self):
         if not (self.ai_win and self.ai_win.winfo_exists()):
             return
-        self.case_tree.delete(*self.case_tree.get_children())
-        self.case_rows = {}
+        for w in self.case_frame.winfo_children():
+            w.destroy()
+        self.case_checks = []
         p = self._current_project()
         used = excel_source.load_usage(p.name) if p else set()
         cat = self.cat_var.get()
-        shown = n_used = 0
+        n_used = 0
         for c in self.cases.get(self.sheet_var.get(), []):
             if cat != '(전체)' and c.category != cat:
                 continue
@@ -884,23 +926,35 @@ class OneNoteExporterGUI:
             n_used += is_used
             if is_used and self.unused_var.get():
                 continue
-            iid = self.case_tree.insert('', tk.END, values=(
-                c.crime.replace('\n', ', '), c.result1.replace('\n', ', '),
-                c.result2.replace('\n', ', '), c.short()),
-                tags=('used',) if is_used else ())
-            self.case_rows[iid] = c
-            shown += 1
-        self.case_count.config(text=f'{shown}건 · 사용함 {n_used}건')
+            var = tk.BooleanVar(value=False)
+            head = ' · '.join(x.replace('\n', ', ') for x in (c.crime, c.result1, c.result2) if x)
+            text = f'{head}    {c.short()[:48]}'
+            tk.Checkbutton(self.case_frame, text=text, variable=var, command=self._update_pick,
+                           font=(F, 9), bg=C['white'], fg='#94a3b8' if is_used else C['text'],
+                           activebackground=C['bg'], selectcolor=C['white'], anchor='w',
+                           padx=8, pady=1).pack(fill=tk.X, padx=4)
+            self.case_checks.append((var, c))
+        self.case_canvas.yview_moveto(0)
+        self.case_count.config(text=f'{len(self.case_checks)}건 · 사용함 {n_used}건')
+        self._update_pick()
+
+    def _update_pick(self):
+        n = sum(1 for v, _ in self.case_checks if v.get())
+        self.pick_lbl.config(text=f'{n}건 선택' if n else '')
 
     def _auto_pick(self):
         try:
             n = int(self.pick_n.get())
         except ValueError:
             n = 1
-        items = self.case_tree.get_children()[:n]
-        self.case_tree.selection_set(items)
-        if items:
-            self.case_tree.see(items[0])
+        for i, (v, _) in enumerate(self.case_checks):
+            v.set(i < n)
+        self._update_pick()
+
+    def _clear_pick(self):
+        for v, _ in self.case_checks:
+            v.set(False)
+        self._update_pick()
 
     # ── 생성 ──
 
@@ -921,23 +975,23 @@ class OneNoteExporterGUI:
 
         jobs = []
         if self.source_var.get() == 'excel':
-            sel = self.case_tree.selection()
+            sel = [c for v, c in self.case_checks if v.get()]
             if not sel:
-                messagebox.showwarning('경고', '목록에서 사례를 선택하세요.\n(Ctrl/Shift로 여러 개, 또는 [N개 선택])',
-                                       parent=w)
+                messagebox.showwarning('경고', '사례를 체크하세요. (또는 [위에서 N개 선택])', parent=w)
                 return
-            for iid in sel:
-                c = self.case_rows[iid]
-                jobs.append((c.crime.split('\n')[0], c.to_prompt(), c))
+            jobs = [(c.crime.split('\n')[0], c.to_prompt(), c) for c in sel]
         else:
             text = self.direct_txt.get('1.0', tk.END).strip()
             if len(text) < 5:
                 messagebox.showwarning('경고', '사건자료(또는 주제)를 입력하세요.', parent=w); return
             jobs.append(('직접입력', text, None))
 
+        acc = self.account_var.get()
+        accounts = [1, 2] if acc == 'both' else [int(acc)]
+        accounts = accounts[:len(jobs)] or accounts[:1]
         auto_export = self.auto_export_var.get()
         CONFIG['auto_export'] = auto_export
-        CONFIG['account'] = self.account_var.get()
+        CONFIG['account'] = acc if acc == 'both' else int(acc)
         app_config.save_config()
         if auto_export and not self.is_connected:
             if not messagebox.askyesno('확인', 'OneNote가 연결되지 않았습니다.\n원고만 만들고 파일로 저장할까요?',
@@ -946,8 +1000,9 @@ class OneNoteExporterGUI:
             auto_export = False
 
         n = int(p.settings.get('편수', 10) or 10)
+        acc_txt = '계정 1 + 2 동시' if len(accounts) == 2 else f'계정 {accounts[0]}'
         msg = (f'{len(jobs)}건 × {n}편 = 원고 {len(jobs) * n}편을 생성합니다.\n'
-               f'계정 {CONFIG["account"]} 사용 · 건당 수 분 걸립니다.')
+               f'{acc_txt} · 건당 수 분 걸립니다.')
         if auto_export:
             msg += f'\n\n완료되는 대로 OneNote "{self.section_var.get()}"에 내보냅니다.'
         if not messagebox.askyesno('원고 생성', msg, parent=w):
@@ -965,8 +1020,8 @@ class OneNoteExporterGUI:
         self.gen_btn.config(state=tk.DISABLED, text='생성 중…')
         self.stop_btn.config(state=tk.NORMAL)
         self.export_btn.config(state=tk.DISABLED)
-        threading.Thread(target=self._generate_thread,
-                         args=(p, jobs, auto_export, opts), daemon=True).start()
+        threading.Thread(target=self._generate_run,
+                         args=(p, jobs, accounts, auto_export, opts), daemon=True).start()
 
     def _stop_generate(self):
         self.gen_stop.set()
@@ -975,57 +1030,85 @@ class OneNoteExporterGUI:
     def _ui(self, fn):
         self.root.after(0, fn)
 
-    def _generate_thread(self, p, jobs, auto_export, opts):
+    def _generate_run(self, p, jobs, accounts, auto_export, opts):
+        """계정 수만큼 작업자를 띄워 사례를 나눠 처리. OneNote 내보내기는 한 번에 하나씩."""
+        import queue
         out_dir = os.path.join(app_config.OUTPUT_DIR,
                                datetime.now().strftime('%Y%m%d') + '_' + p.name)
         os.makedirs(out_dir, exist_ok=True)
-        ok = fail = 0
+        q = queue.Queue()
+        for i, job in enumerate(jobs, 1):
+            q.put((i, job))
+        total = len(jobs)
+        stats = {'ok': 0, 'fail': 0, 'done': 0}
+        lock = threading.Lock()          # 통계·사용기록
+        export_lock = threading.Lock()   # OneNote는 동시에 쓰지 않음
+        multi = len(accounts) > 1
         log = lambda m, l='inf': self._ui(lambda: self._ai_log_msg(m, l))
-        for idx, (title, case_text, case) in enumerate(jobs, 1):
-            if self.gen_stop.is_set():
-                break
-            tag = f'[{idx}/{len(jobs)}] {title}'
-            log(f'{tag} — 원고 작성 중…')
-            self._ui(lambda i=idx: self.prog_status.config(text=f'생성 {i}/{len(jobs)}'))
-            try:
-                text = generator.generate(p, case_text, stop_flag=self.gen_stop)
-            except Exception as e:
-                fail += 1
-                log(f'{tag} 실패: {e}', 'err')
-                if '중지' in str(e) or '한도' in str(e):
-                    break
-                continue
 
-            stamp = datetime.now().strftime('%H%M%S')
-            safe = (case.key if case else '직접입력').replace('/', '_').replace('\\', '_')
-            fpath = os.path.join(out_dir, f'{stamp}_{safe}.md')
-            with open(fpath, 'w', encoding='utf-8') as f:
-                f.write(text)
-            for w in proj.check_output(text, p, case.case_id if case else ''):
-                log(f'  ⚠ {w}', 'warn')
+        def finish(ok):
+            with lock:
+                stats['ok' if ok else 'fail'] += 1
+                stats['done'] += 1
+                d = stats['done']
+            self._ui(lambda: self.prog_status.config(text=f'생성 {d}/{total}'))
 
-            arts = ArticleParser.parse(text)
-            if not arts:
-                fail += 1
-                log(f'{tag}: 원고 형식을 읽지 못했습니다 → {os.path.basename(fpath)}', 'err')
-                continue
-            self._ui(lambda a=arts: self._add_articles(a))
+        def worker(account):
+            who = f'계정{account} ' if multi else ''
+            while not self.gen_stop.is_set():
+                try:
+                    idx, (title, case_text, case) = q.get_nowait()
+                except queue.Empty:
+                    return
+                tag = f'{who}[{idx}/{total}] {title}'
+                log(f'{tag} — 작성 중…')
+                try:
+                    text = generator.generate(p, case_text, stop_flag=self.gen_stop,
+                                              account=account)
+                except Exception as e:
+                    log(f'{tag} 실패: {e}', 'err')
+                    finish(False)
+                    if '중지' in str(e) or '한도' in str(e) or '로그인' in str(e):
+                        return   # 이 계정은 멈추고, 다른 계정은 계속
+                    continue
 
-            exported = True
-            if auto_export:
-                log(f'{tag} — OneNote로 {len(arts)}편 내보내는 중…')
-                res = self.onenote.batch_create_pages(
-                    arts, title_prefix=opts['prefix'], add_footer=opts['add_footer'],
-                    footer_presets=opts['footers'], top_keyword=opts['keyword'])
-                exported = res['fail'] == 0
-                log(f"{tag} — OneNote {res['success']}편 성공 / {res['fail']}편 실패",
-                    'ok' if exported else 'err')
-            if case and exported:
-                excel_source.record_usage(p.name, case)
-            ok += 1
-            log(f'{tag} 완료', 'ok')
+                stamp = datetime.now().strftime('%H%M%S')
+                safe = (case.key if case else '직접입력').replace('/', '_').replace('\\', '_')
+                fpath = os.path.join(out_dir, f'{stamp}_{safe}.md')
+                with open(fpath, 'w', encoding='utf-8') as f:
+                    f.write(text)
+                for wmsg in proj.check_output(text, p, case.case_id if case else ''):
+                    log(f'  ⚠ {wmsg}', 'warn')
 
-        self._ui(lambda: self._generate_done(ok, fail))
+                arts = ArticleParser.parse(text)
+                if not arts:
+                    log(f'{tag}: 원고 형식을 읽지 못했습니다 → {os.path.basename(fpath)}', 'err')
+                    finish(False)
+                    continue
+                self._ui(lambda a=arts: self._add_articles(a))
+
+                exported = True
+                if auto_export:
+                    with export_lock:
+                        log(f'{tag} — OneNote로 {len(arts)}편 내보내는 중…')
+                        res = self.onenote.batch_create_pages(
+                            arts, title_prefix=opts['prefix'], add_footer=opts['add_footer'],
+                            footer_presets=opts['footers'], top_keyword=opts['keyword'])
+                    exported = res['fail'] == 0
+                    if not exported:
+                        log(f"{tag} — OneNote {res['fail']}편 실패 (글 목록에서 다시 내보내기)", 'err')
+                if case and exported:
+                    with lock:
+                        excel_source.record_usage(p.name, case)
+                log(f'{tag} 완료', 'ok')
+                finish(True)
+
+        threads = [threading.Thread(target=worker, args=(a,), daemon=True) for a in accounts]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self._ui(lambda: self._generate_done(stats['ok'], stats['fail']))
 
     def _add_articles(self, arts):
         self.articles.extend(arts)
@@ -1040,7 +1123,7 @@ class OneNoteExporterGUI:
         if self.is_connected:
             self.export_btn.config(state=tk.NORMAL)
         self.prog_status.config(text='')
-        self._ai_log_msg(f'종료: 성공 {ok}건 / 실패 {fail}건', 'ok' if not fail else 'warn')
+        self._ai_log_msg(f'끝: 성공 {ok}건 / 실패 {fail}건', 'ok' if not fail else 'warn')
         self._set_status(f'AI 생성 완료: {ok}건', C['green'] if not fail else C['orange'])
         self._fill_cases()
 

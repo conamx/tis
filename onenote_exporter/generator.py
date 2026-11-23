@@ -66,7 +66,7 @@ def call_claude_cli(prompt, stop_flag=None, timeout=None, system_file=None,
     env.pop('ANTHROPIC_API_KEY', None)
     env.pop('ANTHROPIC_AUTH_TOKEN', None)
     # 계정 2: 로그인 정보를 별도 폴더에 두고 그 폴더로 실행
-    if int(account or CONFIG.get('account') or 1) == 2:
+    if str(account or CONFIG.get('account') or 1) == '2':
         os.makedirs(ACCOUNT2_DIR, exist_ok=True)
         env['CLAUDE_CONFIG_DIR'] = ACCOUNT2_DIR
     else:
@@ -112,7 +112,7 @@ def call_claude_cli(prompt, stop_flag=None, timeout=None, system_file=None,
     return result
 
 
-def generate(project, case_text, stop_flag=None):
+def generate(project, case_text, stop_flag=None, account=None):
     """프로젝트 지침 + 사건자료 → 원고 원문(`# 1` ~ `# N`).
 
     claude.ai 프로젝트와 같은 구조로 보낸다:
@@ -122,7 +122,7 @@ def generate(project, case_text, stop_flag=None):
     s = project.settings
     opts = dict(model=(s.get('모델') or '').strip() or None,
                 effort=(s.get('effort') or '').strip() or None,
-                web_search=bool(s.get('웹검색')))
+                web_search=bool(s.get('웹검색')), account=account)
     fd, sys_path = tempfile.mkstemp(prefix='onenote_guide_', suffix='.md')
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
