@@ -68,6 +68,12 @@ FOOTER_PRESETS = [
         ('법률사무소오엔 홈페이지', True),
         ('https://onlaw.co.kr/onlaw/counsel/index.html', False),
     ]),
+    ('진잠골프', [
+        ('지도', True),
+        ('진잠실내골프연습장', False),
+        ('(12번 사진 삽입)', True),
+        ('tel:0425439991', False),
+    ]),
 ]
 
 C = {
@@ -276,18 +282,27 @@ class OneNoteExporterGUI:
                                 highlightbackground=C['light'], highlightthickness=1)
         footer_frame.pack(fill=tk.X, padx=12, pady=(4, 0))
 
-        tk.Label(footer_frame, text='',
-                 font=(F, 9, 'bold'), bg=C['white'], fg=C['subtext']
-                 ).pack(side=tk.LEFT, padx=(12, 8), pady=6)
-
         self.footer_preset_vars = []
+        boxes = []
         for name, _ in FOOTER_PRESETS:
             var = tk.BooleanVar(value=False)
             self.footer_preset_vars.append(var)
-            tk.Checkbutton(footer_frame, text=name, variable=var,
-                           font=(F, 9), bg=C['white'], fg=C['text'],
-                           activebackground=C['white'], selectcolor=C['white']
-                           ).pack(side=tk.LEFT, padx=(0, 4), pady=6)
+            boxes.append(tk.Checkbutton(footer_frame, text=name, variable=var,
+                                        font=(F, 9), bg=C['white'], fg=C['text'],
+                                        activebackground=C['white'], selectcolor=C['white']))
+
+        def _reflow(e=None):
+            # 창 너비에 들어가는 만큼 한 줄에 놓고, 넘치면 다음 줄로
+            width = max(footer_frame.winfo_width(), 200) - 24
+            x = row = col = 0
+            for b in boxes:
+                w = b.winfo_reqwidth() + 4
+                if x and x + w > width:
+                    row += 1; col = 0; x = 0
+                b.grid(row=row, column=col, sticky='w', padx=(12 if col == 0 else 0, 4), pady=3)
+                col += 1; x += w
+        footer_frame.bind('<Configure>', _reflow)
+        footer_frame.after(50, _reflow)
 
 
 
