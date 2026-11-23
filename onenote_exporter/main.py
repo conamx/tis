@@ -7,7 +7,7 @@ OneNote 글 내보내기 — 진입점
   python main.py --help              # 도움말
 
 빌드:
-  pyinstaller --onefile --noconsole --icon=icon.ico main.py
+  build.bat 더블클릭 (projects 폴더까지 함께 묶임)
 """
 
 import argparse
@@ -32,7 +32,7 @@ def _parse_args():
     parser.add_argument(
         '--version', '-v',
         action='version',
-        version='OneNote Exporter 2.0',
+        version='OneNote Exporter 3.0',
     )
     return parser.parse_args()
 

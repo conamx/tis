@@ -1,0 +1,73 @@
+# app_config.py
+"""설정 파일(config.json)과 폴더 위치 관리.
+
+exe로 빌드하면 config.json / projects / output / 사용기록.csv 는 exe 옆에 생긴다.
+"""
+import json
+import os
+import shutil
+import sys
+
+# 사용자 파일이 놓이는 폴더 (exe 옆 또는 이 소스 폴더)
+if getattr(sys, 'frozen', False):
+    APP_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# exe 안에 묶인 기본 리소스 위치
+BUNDLE_DIR = getattr(sys, '_MEIPASS', APP_DIR)
+
+CONFIG_PATH   = os.path.join(APP_DIR, 'config.json')
+PROJECTS_DIR  = os.path.join(APP_DIR, 'projects')
+OUTPUT_DIR    = os.path.join(APP_DIR, 'output')
+USAGE_LOG     = os.path.join(APP_DIR, '사용기록.csv')
+
+DEFAULTS = {
+    'claude_model': '',         # 비우면 Claude Code 기본값. 예: sonnet / opus
+    'claude_cli_path': '',      # 비우면 자동 찾기
+    'claude_timeout_min': 30,   # 사례 1건(원고 10편) 최대 대기 시간
+    'excel_path': '',
+    'excel_used_check': True,   # 엑셀 '사용체크' 열에 표시가 있으면 쓴 사례로 본다
+    'blue_mode': 'keep',        # [BLUE] 표시: keep(글자 그대로) / color(파란 글씨) / strip(표시 제거)
+    'auto_export': True,        # 원고 생성 후 바로 OneNote로 내보내기
+    'last_project': '',
+}
+
+CONFIG = dict(DEFAULTS)
+
+
+def load_config():
+    CONFIG.clear()
+    CONFIG.update(DEFAULTS)
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, encoding='utf-8') as f:
+                CONFIG.update(json.load(f))
+        except Exception as e:
+            print(f'[설정] config.json 읽기 실패: {e}')
+    return CONFIG
+
+
+def save_config():
+    with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+        json.dump(CONFIG, f, ensure_ascii=False, indent=2)
+
+
+def ensure_projects_dir():
+    """projects 폴더가 없으면 exe에 묶인 기본 프로젝트를 복사해 둔다."""
+    if os.path.isdir(PROJECTS_DIR):
+        return
+    src = os.path.join(BUNDLE_DIR, 'projects')
+    if os.path.isdir(src) and os.path.abspath(src) != os.path.abspath(PROJECTS_DIR):
+        shutil.copytree(src, PROJECTS_DIR)
+    else:
+        os.makedirs(PROJECTS_DIR, exist_ok=True)
+
+
+def open_folder(path):
+    os.makedirs(path, exist_ok=True)
+    if sys.platform.startswith('win'):
+        os.startfile(path)  # noqa
+    else:
+        import subprocess
+        subprocess.Popen(['xdg-open', path])

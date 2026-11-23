@@ -1,5 +1,7 @@
 # 티스토리 자동 발행 매크로
 
+> OneNote 글 내보내기 매크로(AI 원고 생성 포함)는 [`onenote_exporter/`](onenote_exporter/README.md) 폴더에 있습니다.
+
 키워드 입력 → 네이버 블로그 참고글 선택 → AI 원고 생성 (Claude Code 구독 또는 Gemini) → 참고글 유사도 검사/재작성
 → 카드 이미지 생성·업로드 → 티스토리 에디터 자동 주입 (발행 버튼은 직접 누름)
 
