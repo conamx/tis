@@ -2,7 +2,9 @@
 import tkinter as tk
 from tkinter import scrolledtext, messagebox, filedialog, ttk
 import os
+import re
 import threading
+import time
 from datetime import datetime
 from parser import ArticleParser
 from onenote_com import OneNoteManager, SectionInfo
@@ -418,6 +420,7 @@ class OneNoteExporterGUI:
             self._section_map = {s.display_name(): s for s in secs}
             self.section_cb['values'] = ['(자동)'] + list(self._section_map.keys())
             self.section_cb.set('(자동)')
+            self._sync_ai_sections()
             self._log(f"섹션 {len(secs)}개 로드", 'ok')
         except Exception as e:
             self._log(f"섹션 오류: {e}", 'err')
@@ -579,9 +582,9 @@ class OneNoteExporterGUI:
         return tk.Button(parent, text=text, command=cmd, font=(F, 9), bg=C['light'],
                          fg=C['text'], relief=tk.FLAT, padx=12, pady=4, cursor='hand2')
 
-    def _dropdown(self, parent, width=14, command=None):
+    def _dropdown(self, parent, width=14, command=None, var=None):
         """ttk 콤보박스 대신 쓰는 깔끔한 드롭다운 (설정창과 같은 납작한 스타일)"""
-        var = tk.StringVar()
+        var = var or tk.StringVar()
         mb = tk.Menubutton(parent, text='', font=(F, 9), bg=C['bg'], fg=C['text'],
                            activebackground=C['light'], activeforeground=C['text'],
                            relief=tk.FLAT, bd=0, padx=10, pady=5, width=width, anchor='w',
@@ -619,7 +622,7 @@ class OneNoteExporterGUI:
         win = tk.Toplevel(self.root)
         self.ai_win = win
         win.title('AI 원고 생성')
-        win.geometry('820x720')
+        win.geometry('860x880')
         win.minsize(640, 540)
         win.configure(bg=C['bg'])
         win.protocol('WM_DELETE_WINDOW', win.withdraw)
@@ -658,6 +661,55 @@ class OneNoteExporterGUI:
                       ).grid(row=2, column=1, sticky='w', pady=3)
         tk.Label(body, text='동시: 두 계정이 사례를 나눠서 함께 작성', font=(F, 8),
                  bg=C['white'], fg='#94a3b8').grid(row=2, column=2, sticky='w', padx=10)
+        st = tk.Frame(body, bg=C['white'])
+        st.grid(row=3, column=1, columnspan=2, sticky='w', pady=(2, 0))
+        self.acc_status = {}
+        for n in (1, 2):
+            tk.Label(st, text=f'계정 {n}', font=(F, 8, 'bold'), bg=C['white'],
+                     fg=C['subtext']).pack(side=tk.LEFT)
+            lb = tk.Label(st, text='● 확인 중', font=(F, 8), bg=C['white'], fg='#94a3b8')
+            lb.pack(side=tk.LEFT, padx=(4, 4))
+            self.acc_status[n] = lb
+            tk.Button(st, text='로그인', command=lambda n=n: self._login_account(n), font=(F, 8),
+                      bg=C['bg'], fg=C['subtext'], activebackground=C['light'], relief=tk.FLAT,
+                      bd=0, padx=6, cursor='hand2').pack(side=tk.LEFT, padx=(0, 14))
+        tk.Button(st, text='↻ 다시 확인', command=self._check_accounts, font=(F, 8),
+                  bg=C['white'], fg=C['accent'], activebackground=C['white'], relief=tk.FLAT,
+                  bd=0, cursor='hand2').pack(side=tk.LEFT)
+
+        # ── OneNote (메인 화면과 같은 값 공유) ──
+        oc = self._card(win, 'OneNote')
+        self.auto_export_var = tk.BooleanVar(value=CONFIG.get('auto_export', True))
+        tk.Checkbutton(oc._top, text='생성 후 바로 내보내기', variable=self.auto_export_var,
+                       font=(F, 8), bg=C['bg'], fg=C['subtext'], activebackground=C['bg'],
+                       selectcolor=C['white']).pack(side=tk.RIGHT, padx=8)
+        ob = tk.Frame(oc, bg=C['white'])
+        ob.pack(fill=tk.X, padx=12, pady=(6, 10))
+        tk.Label(ob, text='섹션', font=(F, 9), bg=C['white'], fg=C['subtext'], width=7,
+                 anchor='w').grid(row=0, column=0, sticky='w', pady=3)
+        self.section_dd = self._dropdown(ob, width=30, var=self.section_var,
+                                         command=lambda: self._on_section(None))
+        self.section_dd.grid(row=0, column=1, columnspan=3, sticky='w', pady=3)
+        self._sync_ai_sections()
+        tk.Checkbutton(ob, text='하단 구분선', variable=self.footer_var, font=(F, 9),
+                       bg=C['white'], fg=C['subtext'], activebackground=C['white'],
+                       selectcolor=C['white']).grid(row=0, column=4, sticky='w', padx=10)
+        tk.Label(ob, text='접두어', font=(F, 9), bg=C['white'], fg=C['subtext'], width=7,
+                 anchor='w').grid(row=1, column=0, sticky='w', pady=3)
+        tk.Entry(ob, textvariable=self.prefix_var, font=(F, 9), width=20, relief=tk.FLAT,
+                 bg=C['bg'], insertbackground=C['text']).grid(row=1, column=1, sticky='w', ipady=4)
+        tk.Label(ob, text='키워드', font=(F, 9), bg=C['white'], fg=C['subtext']
+                 ).grid(row=1, column=2, sticky='w', padx=(14, 6))
+        tk.Entry(ob, textvariable=self.keyword_var, font=(F, 9), width=20, relief=tk.FLAT,
+                 bg=C['bg'], insertbackground=C['text']).grid(row=1, column=3, sticky='w', ipady=4)
+        tk.Label(ob, text='하단 문구', font=(F, 9), bg=C['white'], fg=C['subtext'], width=7,
+                 anchor='nw').grid(row=2, column=0, sticky='nw', pady=(6, 0))
+        pf = tk.Frame(ob, bg=C['white'])
+        pf.grid(row=2, column=1, columnspan=4, sticky='w', pady=(4, 0))
+        for i, ((name, _), var) in enumerate(zip(FOOTER_PRESETS, self.footer_preset_vars)):
+            tk.Checkbutton(pf, text=name, variable=var, font=(F, 9), bg=C['white'],
+                           fg=C['text'], activebackground=C['white'], selectcolor=C['white']
+                           ).grid(row=i // 4, column=i % 4, sticky='w', padx=(0, 10))
 
         # ── 실행 ──
         run = tk.Frame(win, bg=C['bg'])
@@ -675,11 +727,9 @@ class OneNoteExporterGUI:
 
         # ── 진행 상황 ──
         lc = self._card(win, '진행 상황', side=tk.BOTTOM)
-        self.auto_export_var = tk.BooleanVar(value=CONFIG.get('auto_export', True))
-        tk.Checkbutton(lc._top, text='생성 후 바로 OneNote로 내보내기',
-                       variable=self.auto_export_var, font=(F, 8), bg=C['bg'],
-                       fg=C['subtext'], activebackground=C['bg'], selectcolor=C['white']
-                       ).pack(side=tk.RIGHT, padx=8)
+        self.prog_area = tk.Frame(lc, bg=C['white'])
+        self.prog_area.pack(fill=tk.X, padx=12)
+        self.prog_rows = {}
         self.ai_log = tk.Text(lc, font=(F, 9), bg=C['white'], fg=C['subtext'], relief=tk.FLAT,
                               padx=12, pady=6, height=3, state=tk.DISABLED, wrap=tk.WORD,
                               highlightthickness=0)
@@ -774,11 +824,66 @@ class OneNoteExporterGUI:
         self.direct_txt.pack(fill=tk.BOTH, expand=True, padx=1, pady=(0, 1))
 
         self._refresh_projects()
+        self._check_accounts()
         if CONFIG.get('excel_path') and os.path.exists(CONFIG['excel_path']):
             win.after(200, lambda: self._load_excel(CONFIG['excel_path']))
         else:
             self.excel_lbl.config(text='엑셀 파일을 선택하세요')
         self._on_source()
+
+    def _sync_ai_sections(self):
+        if getattr(self, 'section_dd', None) and self.section_dd.winfo_exists():
+            self.section_dd.set_values(['(자동)'] + list(self._section_map.keys()))
+            self.section_var.set(self.section_var.get())   # 표시 갱신
+
+    def _check_accounts(self):
+        for n, lb in self.acc_status.items():
+            lb.config(text='● 확인 중', fg='#94a3b8')
+
+        def work():
+            for n in (1, 2):
+                ok, msg = generator.check_login(n)
+                col = C['green'] if ok else C['red']
+                self._ui(lambda n=n, ok=ok, msg=msg, col=col: self.acc_status[n].winfo_exists()
+                         and self.acc_status[n].config(text=f'● {msg}', fg=col))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _login_account(self, n):
+        if not generator.find_claude_cli():
+            self._offer_install(); return
+        try:
+            generator.open_login(n)
+        except Exception as e:
+            messagebox.showerror('로그인', str(e), parent=self.ai_win); return
+        self.acc_status[n].config(text='● 로그인 창에서 진행 후 [다시 확인]', fg=C['orange'])
+
+    # ── 진행 표시 ──
+
+    def _prog_set(self, key, text, frac=None):
+        if not (self.ai_win and self.ai_win.winfo_exists()):
+            return
+        row = self.prog_rows.get(key)
+        if row is None:
+            f = tk.Frame(self.prog_area, bg=C['white'])
+            f.pack(fill=tk.X, pady=(6, 0))
+            lb = tk.Label(f, text='', font=(F, 9), bg=C['white'], fg=C['text'], anchor='w')
+            lb.pack(fill=tk.X)
+            track = tk.Frame(f, bg=C['light'], height=4)
+            track.pack(fill=tk.X, pady=(3, 0))
+            track.pack_propagate(False)
+            bar = tk.Frame(track, bg=C['accent'], height=4)
+            bar.place(x=0, y=0, relwidth=0.0, height=4)
+            row = self.prog_rows[key] = (f, lb, bar)
+        _, lb, bar = row
+        lb.config(text=text)
+        if frac is not None:
+            bar.place(x=0, y=0, relwidth=max(0.0, min(1.0, frac)), height=4)
+
+    def _prog_clear(self, key=None):
+        for k in ([key] if key is not None else list(self.prog_rows)):
+            row = self.prog_rows.pop(k, None)
+            if row and row[0].winfo_exists():
+                row[0].destroy()
 
     def _ai_log_msg(self, msg, level='inf'):
         self._log(msg, level)
@@ -988,6 +1093,13 @@ class OneNoteExporterGUI:
 
         acc = self.account_var.get()
         accounts = [1, 2] if acc == 'both' else [int(acc)]
+        bad = [n for n in accounts if not generator.check_login(n)[0]]
+        if bad:
+            names = ', '.join(f'계정 {n}' for n in bad)
+            messagebox.showwarning('로그인 필요', f'{names} 로그인이 필요합니다.\n[로그인] 버튼으로 로그인한 뒤 다시 시도하세요.',
+                                   parent=w)
+            self._check_accounts()
+            return
         accounts = accounts[:len(jobs)] or accounts[:1]
         auto_export = self.auto_export_var.get()
         CONFIG['auto_export'] = auto_export
@@ -1044,6 +1156,7 @@ class OneNoteExporterGUI:
         lock = threading.Lock()          # 통계·사용기록
         export_lock = threading.Lock()   # OneNote는 동시에 쓰지 않음
         multi = len(accounts) > 1
+        per = int(p.settings.get('편수', 10) or 10)
         log = lambda m, l='inf': self._ui(lambda: self._ai_log_msg(m, l))
 
         def finish(ok):
@@ -1061,12 +1174,28 @@ class OneNoteExporterGUI:
                 except queue.Empty:
                     return
                 tag = f'{who}[{idx}/{total}] {title}'
-                log(f'{tag} — 작성 중…')
+                log(f'{tag} — 시작')
+                t0 = time.time()
+                key = account
+
+                def on_progress(stage, txt, tag=tag, t0=t0, key=key):
+                    sec = int(time.time() - t0)
+                    el = f'{sec // 60}분 {sec % 60:02d}초'
+                    if stage == 'think' or not txt:
+                        self._ui(lambda: self._prog_set(key, f'{tag}  ·  구상 중  ·  {el}', 0.02))
+                        return
+                    k = len(re.findall(r'(?m)^#[ \t]+\d+[ \t]*$', txt))
+                    k = max(1, min(k, per))
+                    msg = f'{tag}  ·  원고 {k}/{per}편 작성 중  ·  {len(txt):,}자  ·  {el}'
+                    self._ui(lambda: self._prog_set(key, msg, (k - 0.5) / per))
+
+                self._ui(lambda tag=tag, key=key: self._prog_set(key, f'{tag}  ·  시작 중…', 0.0))
                 try:
                     text = generator.generate(p, case_text, stop_flag=self.gen_stop,
-                                              account=account)
+                                              account=account, progress=on_progress)
                 except Exception as e:
                     log(f'{tag} 실패: {e}', 'err')
+                    self._ui(lambda key=key: self._prog_clear(key))
                     finish(False)
                     if '중지' in str(e) or '한도' in str(e) or '로그인' in str(e):
                         return   # 이 계정은 멈추고, 다른 계정은 계속
@@ -1089,6 +1218,8 @@ class OneNoteExporterGUI:
 
                 exported = True
                 if auto_export:
+                    self._ui(lambda tag=tag, key=key, n=len(arts): self._prog_set(
+                        key, f'{tag}  ·  OneNote에 {n}편 넣는 중…', 1.0))
                     with export_lock:
                         log(f'{tag} — OneNote로 {len(arts)}편 내보내는 중…')
                         res = self.onenote.batch_create_pages(
@@ -1100,7 +1231,9 @@ class OneNoteExporterGUI:
                 if case and exported:
                     with lock:
                         excel_source.record_usage(p.name, case)
-                log(f'{tag} 완료', 'ok')
+                sec = int(time.time() - t0)
+                log(f'{tag} 완료 ({len(arts)}편 · {sec // 60}분 {sec % 60:02d}초)', 'ok')
+                self._ui(lambda key=key: self._prog_clear(key))
                 finish(True)
 
         threads = [threading.Thread(target=worker, args=(a,), daemon=True) for a in accounts]
@@ -1117,6 +1250,7 @@ class OneNoteExporterGUI:
 
     def _generate_done(self, ok, fail):
         self.generating = False
+        self._prog_clear()
         if self.ai_win and self.ai_win.winfo_exists():
             self.gen_btn.config(state=tk.NORMAL, text='원고 생성')
             self.stop_btn.config(state=tk.DISABLED)
@@ -1176,53 +1310,17 @@ class OneNoteExporterGUI:
                  fg='#94a3b8').pack(anchor='w', padx=(88, 0))
         field('최대 대기(분)', 'claude_timeout_min', width=6)
 
-        acc = self._card(win, '계정')
-        ab = tk.Frame(acc, bg=C['white'])
-        ab.pack(fill=tk.X, padx=12, pady=(4, 10))
-        status = {}
+        irow = tk.Frame(body, bg=C['white'])
+        irow.pack(fill=tk.X, pady=(8, 0))
+        tk.Label(irow, text='Claude Code가 없는 PC', font=(F, 8), bg=C['white'],
+                 fg='#94a3b8', width=16, anchor='w').pack(side=tk.LEFT)
+        self._small_btn(irow, 'Claude Code 설치하기', self._install_claude).pack(side=tk.LEFT)
+        tk.Label(body, text='계정 로그인·확인은 AI 원고 생성 창에서 합니다', font=(F, 8),
+                 bg=C['white'], fg='#94a3b8').pack(anchor='w', pady=(6, 0))
 
         def apply_entries():
             CONFIG['claude_model'] = entries['claude_model'].get().strip()
             CONFIG['claude_cli_path'] = entries['claude_cli_path'].get().strip()
-
-        def test(n):
-            apply_entries()
-            status[n].config(text='확인 중…', fg=C['subtext'])
-
-            def work():
-                try:
-                    r = generator.call_claude_cli("'연결 성공'이라고만 답해주세요.", timeout=120,
-                                                  account=n)
-                    self._ui(lambda: status[n].winfo_exists() and
-                             status[n].config(text=f'✅ {r.strip()[:20]}', fg=C['green']))
-                except Exception as e:
-                    m = str(e)
-                    self._ui(lambda: status[n].winfo_exists() and
-                             status[n].config(text=f'❌ {m}', fg=C['red']))
-            threading.Thread(target=work, daemon=True).start()
-
-        def login(n):
-            apply_entries()
-            try:
-                generator.open_login(n)
-            except Exception as e:
-                messagebox.showerror('로그인', str(e), parent=win)
-
-        for n in (1, 2):
-            row = tk.Frame(ab, bg=C['white'])
-            row.pack(fill=tk.X, pady=3)
-            tk.Label(row, text=f'계정 {n}', font=(F, 9, 'bold'), bg=C['white'], fg=C['text'],
-                     width=8, anchor='w').pack(side=tk.LEFT)
-            self._small_btn(row, '로그인', lambda n=n: login(n)).pack(side=tk.LEFT, padx=(0, 4))
-            self._small_btn(row, '연결 테스트', lambda n=n: test(n)).pack(side=tk.LEFT)
-            status[n] = tk.Label(row, text='', font=(F, 8), bg=C['white'], fg=C['subtext'],
-                                 wraplength=260, justify='left')
-            status[n].pack(side=tk.LEFT, padx=8)
-        irow = tk.Frame(ab, bg=C['white'])
-        irow.pack(fill=tk.X, pady=(6, 0))
-        tk.Label(irow, text='Claude Code가 없는 PC', font=(F, 8), bg=C['white'],
-                 fg='#94a3b8').pack(side=tk.LEFT)
-        self._small_btn(irow, 'Claude Code 설치하기', self._install_claude).pack(side=tk.LEFT, padx=8)
 
         ex = self._card(win, '엑셀')
         used_var = tk.BooleanVar(value=CONFIG.get('excel_used_check', True))

@@ -36,19 +36,55 @@ def find_claude_cli():
     return None
 
 
+def _account_env(account):
+    env = os.environ.copy()
+    # API 키가 환경변수에 있으면 구독 대신 API로 과금되므로 제거
+    env.pop('ANTHROPIC_API_KEY', None)
+    env.pop('ANTHROPIC_AUTH_TOKEN', None)
+    # 계정 2: 로그인 정보를 별도 폴더에 두고 그 폴더로 실행
+    if str(account or 1) == '2':
+        os.makedirs(ACCOUNT2_DIR, exist_ok=True)
+        env['CLAUDE_CONFIG_DIR'] = ACCOUNT2_DIR
+    else:
+        env.pop('CLAUDE_CONFIG_DIR', None)
+    return env
+
+
+def check_login(account):
+    """사용량을 쓰지 않고 로그인 상태만 확인. (로그인됨 여부, 표시용 문구)"""
+    exe = find_claude_cli()
+    if not exe:
+        return False, 'Claude Code 없음'
+    try:
+        r = subprocess.run([exe, 'auth', 'status', '--json'], capture_output=True, text=True,
+                           encoding='utf-8', errors='replace', timeout=30,
+                           env=_account_env(account), cwd=tempfile.gettempdir(),
+                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        data = json.loads(r.stdout or '{}')
+    except Exception:
+        return False, '확인 실패'
+    if not data.get('loggedIn'):
+        return False, '로그인 필요'
+    acc = data.get('account') if isinstance(data.get('account'), dict) else {}
+    who = data.get('email') or acc.get('email')
+    return True, (who or '로그인됨')
+
+
 def call_claude_cli(prompt, stop_flag=None, timeout=None, system_file=None,
-                    model=None, effort=None, web_search=False, account=None):
+                    model=None, effort=None, web_search=False, account=None, progress=None):
     """`claude -p` 호출. 프롬프트는 stdin으로 전달(명령줄 길이 제한 회피).
     --tools "" : 파일 읽기/명령 실행 없이 글만 쓰게 함.
     system_file: Claude Code 기본(코딩용) 시스템 프롬프트를 이 파일 내용(지침)으로 교체
-                 → claude.ai 프로젝트에 지침을 넣은 것과 같은 구조, 사용량도 줄어듦."""
+    progress(stage, text): 작성 중인 글을 실시간으로 받는 함수 (stage: 'think' / 'write')"""
+    import queue
+    import threading
     exe = find_claude_cli()
     if not exe:
-        raise AIError('Claude Code를 찾지 못했습니다. 설치 후 터미널에서 `claude`를 한 번 실행해 '
-                      '로그인하거나, ⚙ 설정에 실행 파일 경로를 넣어주세요.')
+        raise AIError('Claude Code를 찾지 못했습니다. 설정 → [Claude Code 설치하기]를 누르세요.')
     if timeout is None:
         timeout = int(CONFIG.get('claude_timeout_min') or 30) * 60
-    cmd = [exe, '-p', '--output-format', 'json', '--no-session-persistence']
+    cmd = [exe, '-p', '--output-format', 'stream-json', '--verbose',
+           '--include-partial-messages', '--no-session-persistence']
     if web_search:
         cmd += ['--tools', 'WebSearch', '--allowedTools', 'WebSearch']
     else:
@@ -61,16 +97,7 @@ def call_claude_cli(prompt, stop_flag=None, timeout=None, system_file=None,
     if system_file:
         cmd += ['--system-prompt-file', system_file]
 
-    env = os.environ.copy()
-    # API 키가 환경변수에 있으면 구독 대신 API로 과금되므로 제거
-    env.pop('ANTHROPIC_API_KEY', None)
-    env.pop('ANTHROPIC_AUTH_TOKEN', None)
-    # 계정 2: 로그인 정보를 별도 폴더에 두고 그 폴더로 실행
-    if str(account or CONFIG.get('account') or 1) == '2':
-        os.makedirs(ACCOUNT2_DIR, exist_ok=True)
-        env['CLAUDE_CONFIG_DIR'] = ACCOUNT2_DIR
-    else:
-        env.pop('CLAUDE_CONFIG_DIR', None)
+    env = _account_env(account)
     # 원고 10편은 길어서 기본 출력 한도에 잘릴 수 있음 → 한도를 넉넉히
     env.setdefault('CLAUDE_CODE_MAX_OUTPUT_TOKENS', '64000')
     flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)  # 윈도우에서 검은 창 안 뜨게
@@ -79,40 +106,75 @@ def call_claude_cli(prompt, stop_flag=None, timeout=None, system_file=None,
                             stderr=subprocess.PIPE, text=True, encoding='utf-8',
                             errors='replace', cwd=tempfile.gettempdir(), env=env,
                             creationflags=flags)
-    started = time.time()
-    pending_input = prompt
+    lines, err_buf = queue.Queue(), []
+
+    def _read_out():
+        for line in proc.stdout:
+            lines.put(line)
+        lines.put(None)
+    threading.Thread(target=_read_out, daemon=True).start()
+    threading.Thread(target=lambda: err_buf.append(proc.stderr.read()), daemon=True).start()
+    try:
+        proc.stdin.write(prompt)
+        proc.stdin.close()
+    except OSError:
+        pass
+
+    started = last_cb = time.time()
+    text, result, stage, raw_tail = [], None, 'think', []
     while True:
         try:
-            out, err = proc.communicate(input=pending_input, timeout=2)
+            line = lines.get(timeout=1)
+        except queue.Empty:
+            line = ''
+        if stop_flag and stop_flag.is_set():
+            proc.kill()
+            raise AIError('사용자 중지')
+        if time.time() - started > timeout:
+            proc.kill()
+            raise AIError(f'Claude Code 응답 시간 초과 ({timeout // 60}분)')
+        if line is None:
             break
-        except subprocess.TimeoutExpired:
-            pending_input = None  # stdin은 첫 호출에서 이미 전달됨
-            if stop_flag and stop_flag.is_set():
-                proc.kill(); proc.communicate()
-                raise AIError('사용자 중지')
-            if time.time() - started > timeout:
-                proc.kill(); proc.communicate()
-                raise AIError(f'Claude Code 응답 시간 초과 ({timeout // 60}분)')
+        if line:
+            raw_tail = (raw_tail + [line])[-5:]
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = ev.get('type')
+            if t == 'stream_event':
+                e = ev.get('event', {})
+                if e.get('type') == 'content_block_delta':
+                    d = e.get('delta', {})
+                    if d.get('type') == 'text_delta':
+                        text.append(d.get('text', ''))
+                        stage = 'write'
+            elif t == 'result':
+                result = ev
+        if progress and time.time() - last_cb >= 1:
+            last_cb = time.time()
+            try:
+                progress(stage, ''.join(text))
+            except Exception:
+                pass
+    proc.wait(timeout=10)
 
-    try:
-        data = json.loads(out)
-    except (json.JSONDecodeError, TypeError):
-        msg = (err or out or '').strip()[:300]
+    if result is None:
+        msg = ((err_buf[0] if err_buf else '') or ''.join(raw_tail)).strip()[:300]
         raise AIError(f'Claude Code 실행 실패 (코드 {proc.returncode}): {msg or "출력 없음"}')
-
-    result = data.get('result') or ''
-    if data.get('is_error') or data.get('subtype') != 'success' or not result.strip():
+    out = result.get('result') or ''.join(text)
+    if result.get('is_error') or result.get('subtype') != 'success' or not out.strip():
         hint = ''
-        low = result.lower()
+        low = out.lower()
         if 'login' in low or 'auth' in low:
-            hint = ' → 터미널에서 `claude` 실행 후 /login 으로 로그인하세요'
+            hint = ' → 로그인이 필요합니다'
         elif 'limit' in low:
-            hint = ' → 구독 사용량 한도에 걸렸습니다. 나중에 다시 시도하세요'
-        raise AIError(f'Claude Code 오류: {result[:200] or data.get("subtype")}{hint}')
-    return result
+            hint = ' → 사용량 한도에 걸렸습니다. 나중에 다시 시도하세요'
+        raise AIError(f'Claude Code 오류: {out[:200] or result.get("subtype")}{hint}')
+    return out
 
 
-def generate(project, case_text, stop_flag=None, account=None):
+def generate(project, case_text, stop_flag=None, account=None, progress=None):
     """프로젝트 지침 + 사건자료 → 원고 원문(`# 1` ~ `# N`).
 
     claude.ai 프로젝트와 같은 구조로 보낸다:
@@ -122,7 +184,7 @@ def generate(project, case_text, stop_flag=None, account=None):
     s = project.settings
     opts = dict(model=(s.get('모델') or '').strip() or None,
                 effort=(s.get('effort') or '').strip() or None,
-                web_search=bool(s.get('웹검색')), account=account)
+                web_search=bool(s.get('웹검색')), account=account, progress=progress)
     fd, sys_path = tempfile.mkstemp(prefix='onenote_guide_', suffix='.md')
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
