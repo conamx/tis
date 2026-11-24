@@ -32,6 +32,8 @@ DEFAULT_SETTINGS = {
         '원고당_정확히1회': [],
         '금지문구': [],
         '사건번호_노출금지': True,
+        '제목_최대글자': 0,     # 0이면 검사 안 함. 마지막 결과 괄호(와 그 앞 공백)는 빼고 셈
+        '본문_최소글자': 0,     # 0이면 검사 안 함. 제목·소제목·표·목록·해시태그·기호·공백 제외
     },
 }
 
@@ -159,7 +161,48 @@ def check_output(text, project, case_id=''):
                 issues.append((num, f'금지 문구 "{phrase}" 포함'))
         if rules.get('사건번호_노출금지') and case_id and case_id in body:
             issues.append((num, '사건번호가 원고에 노출됨'))
+        mx = int(rules.get('제목_최대글자') or 0)
+        if mx:
+            tl = title_length(body.strip().split('\n')[0])
+            if tl > mx:
+                issues.append((num, f'제목 {tl}자 (결과 괄호 빼고 {mx}자 이하여야 함)'))
+        mn = int(rules.get('본문_최소글자') or 0)
+        if mn:
+            bc = body_chars(body)
+            if bc < mn:
+                issues.append((num, f'본문 {bc:,}자 (최소 {mn:,}자)'))
     return issues
+
+
+def title_length(title):
+    """제목 글자 수 — 맨 끝 결과 괄호(안의 중첩 괄호 포함)와 그 앞 공백 1개는 뺀다."""
+    t = title.strip()
+    if t.endswith(')'):
+        depth = 0
+        for i in range(len(t) - 1, -1, -1):
+            if t[i] == ')':
+                depth += 1
+            elif t[i] == '(':
+                depth -= 1
+                if depth == 0:
+                    t = t[:i]
+                    if t.endswith(' '):
+                        t = t[:-1]
+                    break
+    return len(t)
+
+
+def body_chars(body):
+    """실제 서술문 글자 수 — 제목·소제목·표·목록·해시태그 줄, 마크다운 기호, 공백 제외"""
+    lines = body.strip().split('\n')[1:]          # 첫 줄 = 제목
+    keep = []
+    for ln in lines:
+        t = ln.strip()
+        if not t or t.startswith(('#', '|', '- ', '* ', '• ')):
+            continue
+        keep.append(t)
+    txt = re.sub(r'[*_`>]', '', ''.join(keep))
+    return len(re.sub(r'\s+', '', txt))
 
 
 def split_articles(text):
