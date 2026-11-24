@@ -1513,7 +1513,7 @@ class OneNoteExporterGUI:
                 if opts['autofix']:
                     bad = {}
                     for num, msg in issues:
-                        if num:
+                        if num and not msg.startswith('[경고]'):
                             bad.setdefault(num, []).append(msg)
                     if bad:
                         arts_raw = proj.split_articles(text)
