@@ -748,10 +748,7 @@ class OneNoteExporterGUI:
         self.count_var = tk.StringVar(value='10')
         tk.Entry(qf, textvariable=self.count_var, width=3, font=(F, 9), relief=tk.FLAT,
                  bg=C['bg'], justify='center').pack(side=tk.LEFT, padx=4, ipady=3)
-        tk.Label(qf, text='편   품질', font=(F, 9), bg=C['white'], fg=C['subtext']).pack(side=tk.LEFT)
-        self.quality_var = tk.StringVar(value='medium')
-        self._segment(qf, self.quality_var, [('low', '절약'), ('medium', '기본'), ('high', '고품질')]
-                      ).pack(side=tk.LEFT, padx=(6, 0))
+        tk.Label(qf, text='편', font=(F, 9), bg=C['white'], fg=C['subtext']).pack(side=tk.LEFT)
 
         label(2, '계정')
         acc = CONFIG.get('account') or 1
@@ -1123,7 +1120,7 @@ class OneNoteExporterGUI:
         except ValueError:
             n = 10
         return {
-            '편수': n, 'effort': self.quality_var.get(),
+            '편수': n,
             '접두어': self.prefix_var.get(), '상단키워드': self.keyword_var.get(),
             '하단프리셋': [name for var, (name, _) in zip(self.footer_preset_vars, FOOTER_PRESETS)
                        if var.get()],
@@ -1175,7 +1172,6 @@ class OneNoteExporterGUI:
             var.set(name in wanted)
         self.direct_hint.config(text=s.get('입력안내', ''))
         self.count_var.set(str(s.get('편수', 10)))
-        self.quality_var.set(s.get('effort') or 'medium')
         self.footer_var.set(bool(s.get('하단구분선', False)))
         if s.get('계정'):
             self.account_var.set(str(s.get('계정')))
@@ -1788,34 +1784,30 @@ class OneNoteExporterGUI:
     # ── 지침 관리 (파일 추가·삭제·수정, 검사 규칙) ──
 
     def _guide_manager(self):
-        p = self._current_project()
-        if not p:
-            messagebox.showwarning('지침 관리', '프로젝트를 먼저 고르세요.', parent=self.ai_win); return
+        """지침 관리: 모든 지침을 이름으로 보여주고 추가·이름 변경·삭제·편집, 지침별 검사 규칙"""
         w = tk.Toplevel(self.ai_win)
-        w.title(f'지침 관리 — {p.name}')
-        w.geometry('960x680')
-        w.minsize(760, 520)
+        w.title('지침 관리')
+        w.geometry('1000x700')
+        w.minsize(800, 540)
         w.configure(bg=C['bg'])
         w.transient(self.ai_win)
-        st = {'cur': None, 'dirty': False}
-        RULES = '⚙  자동 검사 규칙'
+        st = {'rows': [], 'cur': None, 'dirty': False}   # cur = (kind, project, filename)
 
-        # 왼쪽: 파일 목록
-        left = tk.Frame(w, bg=C['white'], highlightbackground=C['light'], highlightthickness=1, width=250)
+        # ── 왼쪽: 지침 목록 ──
+        left = tk.Frame(w, bg=C['white'], highlightbackground=C['light'], highlightthickness=1, width=300)
         left.pack(side=tk.LEFT, fill=tk.Y, padx=(12, 0), pady=12)
         left.pack_propagate(False)
         lt = tk.Frame(left, bg=C['bg']); lt.pack(fill=tk.X, padx=1, pady=1)
-        tk.Label(lt, text='지침 · 소스 파일', font=(F, 9, 'bold'), bg=C['bg'],
+        tk.Label(lt, text='지침 목록', font=(F, 9, 'bold'), bg=C['bg'],
                  fg=C['subtext']).pack(side=tk.LEFT, padx=12, pady=6)
         lb = tk.Listbox(left, font=(F, 9), relief=tk.FLAT, bd=0, highlightthickness=0,
                         selectbackground='#dbeafe', selectforeground=C['text'], fg=C['text'],
                         activestyle='none', exportselection=False)
         lb.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-        tk.Label(left, text='지침.md = 메인 지침 · 나머지 = 프로젝트 소스\n(.md/.txt 파일은 모두 같이 읽음)',
-                 font=(F, 8), bg=C['white'], fg='#94a3b8', justify='left').pack(anchor='w', padx=10)
-        lbtn = tk.Frame(left, bg=C['white']); lbtn.pack(fill=tk.X, padx=6, pady=8)
+        lbtn = tk.Frame(left, bg=C['white']); lbtn.pack(fill=tk.X, padx=6, pady=(0, 4))
+        lbtn2 = tk.Frame(left, bg=C['white']); lbtn2.pack(fill=tk.X, padx=6, pady=(0, 8))
 
-        # 오른쪽: 편집기 / 규칙
+        # ── 오른쪽 ──
         right = tk.Frame(w, bg=C['white'], highlightbackground=C['light'], highlightthickness=1)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=12, pady=12)
         rt = tk.Frame(right, bg=C['bg']); rt.pack(fill=tk.X, padx=1, pady=1)
@@ -1823,68 +1815,143 @@ class OneNoteExporterGUI:
         title.pack(side=tk.LEFT, padx=12, pady=6)
         info = tk.Label(rt, text='', font=(F, 8), bg=C['bg'], fg='#94a3b8')
         info.pack(side=tk.RIGHT, padx=12)
+        rbtn = tk.Frame(right, bg=C['bg']); rbtn.pack(fill=tk.X, padx=1, pady=1, side=tk.BOTTOM)
         body = tk.Frame(right, bg=C['white']); body.pack(fill=tk.BOTH, expand=True)
         editor = scrolledtext.ScrolledText(body, font=(F, 10), wrap=tk.WORD, relief=tk.FLAT,
                                            padx=14, pady=10, undo=True, highlightthickness=0)
-        rules_f = tk.Frame(body, bg=C['white'])
-        rbtn = tk.Frame(right, bg=C['bg']); rbtn.pack(fill=tk.X, padx=1, pady=1, side=tk.BOTTOM)
+        panel = tk.Frame(body, bg=C['white'])
+        rv = {}
 
-        def files():
-            return [os.path.basename(f) for f in p.guide_files()]
+        def projects_now():
+            return proj.list_projects()
 
         def refresh(select=None):
+            """select = (kind, project_name, filename)"""
             lb.delete(0, tk.END)
-            for f in files():
-                lb.insert(tk.END, ('★ ' if f == proj.MAIN_GUIDE else '    ') + f)
-            lb.insert(tk.END, RULES)
-            names = files() + [RULES]
-            idx = names.index(select) if select in names else 0
+            st['rows'] = []
+            for p in projects_now():
+                st['rows'].append(('project', p.name, None))
+                lb.insert(tk.END, f'■  {p.name}')
+                lb.itemconfig(tk.END, fg=C['text'])
+                for f in p.guide_files():
+                    fn = os.path.basename(f)
+                    kind = '메인 지침' if fn == proj.MAIN_GUIDE else '참고'
+                    st['rows'].append(('file', p.name, fn))
+                    lb.insert(tk.END, f'      {kind} · {proj.file_title(f, 22)}')
+                    lb.itemconfig(tk.END, fg=C['subtext'])
+                r = p.settings.get('검사', {})
+                n = (len(r.get('원고당_정확히1회', [])) + len(r.get('금지문구', [])) +
+                     bool(r.get('제목_최대글자')) + bool(r.get('본문_최소글자')))
+                st['rows'].append(('rules', p.name, None))
+                lb.insert(tk.END, f'      ⚙ 자동 검사 규칙 ({n}개)' if n else '      ⚙ 자동 검사 규칙 (없음)')
+                lb.itemconfig(tk.END, fg='#94a3b8')
+            if not st['rows']:
+                open_item(None); return
+            idx = 0
+            if select:
+                for i, row in enumerate(st['rows']):
+                    if row[:2] == select[:2] and (row[2] == select[2] or select[0] != 'file'):
+                        idx = i; break
             lb.selection_clear(0, tk.END); lb.selection_set(idx); lb.see(idx)
-            open_item(names[idx])
-            self.project_info.config(text=f"{p.settings.get('편수')}편 · 지침 파일 {len(files())}개")
+            open_item(st['rows'][idx])
+
+        def get_p(name):
+            return next((x for x in projects_now() if x.name == name), None)
 
         def count():
-            txt = editor.get('1.0', 'end-1c')
-            info.config(text=f'{len(txt):,}자' + ('  · 수정됨' if st['dirty'] else ''))
+            info.config(text=f"{len(editor.get('1.0', 'end-1c')):,}자" + ('  · 수정됨' if st['dirty'] else ''))
 
-        def save_cur(quiet=True):
+        def save_cur():
             cur = st['cur']
-            if cur and cur != RULES and st['dirty']:
-                with open(os.path.join(p.folder, cur), 'w', encoding='utf-8') as f:
+            if not cur:
+                return
+            kind, pname, fn = cur
+            p = get_p(pname)
+            if kind == 'file' and st['dirty'] and p:
+                with open(os.path.join(p.folder, fn), 'w', encoding='utf-8') as f:
                     f.write(editor.get('1.0', 'end-1c'))
                 st['dirty'] = False
                 count()
-                if not quiet:
-                    self._ai_log_msg(f'지침 저장: {cur}', 'ok')
-            elif cur == RULES:
-                save_rules()
+            elif kind == 'rules' and p:
+                save_rules(p)
 
-        def open_item(name):
-            if st['cur'] and st['cur'] != name:
-                save_cur()
-            st['cur'] = name
-            editor.pack_forget(); rules_f.pack_forget()
+        def clear_right():
+            editor.pack_forget(); panel.pack_forget()
+            for c in panel.winfo_children():
+                c.destroy()
             for c in rbtn.winfo_children():
                 c.destroy()
-            if name == RULES:
-                title.config(text='자동 검사 규칙'); info.config(text='')
-                build_rules()
-                rules_f.pack(fill=tk.BOTH, expand=True, padx=14, pady=10)
-                _btn(rbtn, '저장', lambda: (save_rules(), self._ai_log_msg('검사 규칙 저장', 'ok')),
-                     bg=C['accent'], fs=10, px=22, py=6).pack(side=tk.RIGHT, padx=8, pady=6)
+
+        def open_item(row):
+            if st['cur'] and st['cur'] != row:
+                save_cur()
+            st['cur'] = row
+            clear_right()
+            if not row:
+                title.config(text='지침이 없습니다'); info.config(text='')
                 return
-            title.config(text=name)
-            editor.config(state=tk.NORMAL)
+            kind, pname, fn = row
+            p = get_p(pname)
+            if kind == 'project':
+                show_project(p)
+            elif kind == 'rules':
+                show_rules(p)
+            else:
+                show_file(p, fn)
+
+        # 지침(프로젝트) 개요
+        def show_project(p):
+            title.config(text=p.name); info.config(text='')
+            panel.pack(fill=tk.BOTH, expand=True, padx=16, pady=12)
+            tk.Label(panel, text='지침 이름', font=(F, 9, 'bold'), bg=C['white']).pack(anchor='w')
+            row = tk.Frame(panel, bg=C['white']); row.pack(fill=tk.X, pady=(4, 12))
+            ent = tk.Entry(row, font=(F, 10), width=30, relief=tk.FLAT, bg=C['bg'])
+            ent.insert(0, p.name); ent.pack(side=tk.LEFT, ipady=4)
+            def rename():
+                if self.generating:
+                    messagebox.showwarning('지침', '원고 생성 중에는 바꿀 수 없습니다.', parent=w); return
+                if ent.get().strip() == p.name:
+                    return
+                try:
+                    np_ = proj.rename_project(p, ent.get())
+                except Exception as e:
+                    messagebox.showerror('지침', str(e), parent=w); return
+                if CONFIG.get('last_project') == p.name:
+                    CONFIG['last_project'] = np_.name; app_config.save_config()
+                if self.project_var.get() == p.name:
+                    self._loaded_project = None
+                    self.project_var.set(np_.name)
+                self._refresh_projects()
+                st['cur'] = None
+                refresh(('project', np_.name, None))
+            self._small_btn(row, '이름 바꾸기', rename).pack(side=tk.LEFT, padx=6)
+            files = [os.path.basename(f) for f in p.guide_files()]
+            tk.Label(panel, text=f'파일 {len(files)}개 — 모두 함께 Claude에게 전달됩니다', font=(F, 9),
+                     bg=C['white'], fg=C['subtext']).pack(anchor='w')
+            for f in p.guide_files():
+                fn = os.path.basename(f)
+                tk.Label(panel, text=f"  · {'메인 지침' if fn == proj.MAIN_GUIDE else '참고'}  "
+                                     f"{proj.file_title(f, 50)}", font=(F, 9), bg=C['white'],
+                         fg=C['text']).pack(anchor='w', pady=1)
+            tk.Label(panel, text='\n· 메인 지침을 새 버전으로 바꾸려면 왼쪽에서 "메인 지침"을 고르고 [복사해 둔 내용으로 전체 바꾸기]\n'
+                                 '· 참고 파일(세부지침 등)은 아래 [+ 파일] 또는 [가져오기]\n'
+                                 '· 이 지침으로 원고를 쓰려면 AI 원고 생성 창의 프로젝트에서 이 이름을 고르세요',
+                     font=(F, 8), bg=C['white'], fg='#94a3b8', justify='left').pack(anchor='w')
+
+        # 파일 편집
+        def show_file(p, fn):
+            kind = '메인 지침' if fn == proj.MAIN_GUIDE else '참고 파일'
+            title.config(text=f'{p.name}  ›  {kind}  ·  {proj.file_title(os.path.join(p.folder, fn), 40)}')
             editor.delete('1.0', tk.END)
-            editor.insert('1.0', proj._read_text(os.path.join(p.folder, name)))
+            editor.insert('1.0', proj._read_text(os.path.join(p.folder, fn)))
             editor.edit_reset(); editor.edit_modified(False)
             st['dirty'] = False
             editor.pack(fill=tk.BOTH, expand=True)
             count()
-            _btn(rbtn, '저장', lambda: save_cur(quiet=False), bg=C['accent'], fs=10, px=22, py=6
-                 ).pack(side=tk.RIGHT, padx=8, pady=6)
+            _btn(rbtn, '저장', lambda: (save_cur(), refresh(st['cur'])), bg=C['accent'], fs=10,
+                 px=22, py=6).pack(side=tk.RIGHT, padx=8, pady=6)
             self._small_btn(rbtn, '복사해 둔 내용으로 전체 바꾸기', replace_clip).pack(side=tk.RIGHT, pady=6)
-            tk.Label(rbtn, text='다른 파일로 넘어가거나 창을 닫으면 자동 저장', font=(F, 8),
+            tk.Label(rbtn, text='다른 항목으로 넘어가거나 창을 닫으면 자동 저장', font=(F, 8),
                      bg=C['bg'], fg='#94a3b8').pack(side=tk.LEFT, padx=12)
 
         def on_mod(_=None):
@@ -1893,7 +1960,7 @@ class OneNoteExporterGUI:
                 editor.edit_modified(False)
                 count()
         editor.bind('<<Modified>>', on_mod)
-        editor.bind('<Control-s>', lambda e: (save_cur(quiet=False), 'break')[1])
+        editor.bind('<Control-s>', lambda e: (save_cur(), 'break')[1])
 
         def replace_clip():
             try:
@@ -1902,25 +1969,131 @@ class OneNoteExporterGUI:
                 txt = ''
             if not txt.strip():
                 messagebox.showwarning('지침', '먼저 새 지침 내용을 복사(Ctrl+C)하세요.', parent=w); return
-            if not messagebox.askyesno('지침', f'"{st["cur"]}" 내용을 복사해 둔 내용({len(txt):,}자)으로 바꿀까요?',
-                                       parent=w):
+            if not messagebox.askyesno('지침', f'복사해 둔 내용({len(txt):,}자)으로 전체를 바꿀까요?', parent=w):
                 return
             editor.delete('1.0', tk.END); editor.insert('1.0', txt)
             st['dirty'] = True
-            save_cur(quiet=False)
+            cur = st['cur']
+            save_cur()
+            refresh(cur)
+            offer_rules(get_p(cur[1]))
+
+        # 검사 규칙
+        def show_rules(p):
+            title.config(text=f'{p.name}  ›  자동 검사 규칙'); info.config(text='')
+            panel.pack(fill=tk.BOTH, expand=True, padx=16, pady=10)
+            tk.Label(panel, text='원고를 다 쓴 뒤 매크로가 이 지침의 규칙을 기계적으로 점검합니다. '
+                                 '걸린 원고는 그 편만 자동으로 다시 씁니다.\n'
+                                 '지침마다 따로 저장되고, 비워 두면 검사하지 않습니다.',
+                     font=(F, 8), bg=C['white'], fg=C['subtext'], justify='left').pack(anchor='w')
+            ar = tk.Frame(panel, bg=C['white']); ar.pack(fill=tk.X, pady=(6, 4))
+            self._small_btn(ar, '✨ 지침에서 자동으로 만들기', lambda: auto_rules(p)).pack(side=tk.LEFT)
+            rv['status'] = tk.Label(ar, text='', font=(F, 8), bg=C['white'], fg=C['subtext'])
+            rv['status'].pack(side=tk.LEFT, padx=8)
+            build_rule_form(p.settings.get('검사', {}))
+            _btn(rbtn, '저장', lambda: (save_rules(p), refresh(('rules', p.name, None))),
+                 bg=C['accent'], fs=10, px=22, py=6).pack(side=tk.RIGHT, padx=8, pady=6)
+
+        def build_rule_form(r):
+            if rv.get('form') and rv['form'].winfo_exists():
+                rv['form'].destroy()
+            f = tk.Frame(panel, bg=C['white']); f.pack(fill=tk.BOTH, expand=True)
+            rv['form'] = f
+            def lab(t):
+                tk.Label(f, text=t, font=(F, 9, 'bold'), bg=C['white'], fg=C['text']).pack(anchor='w', pady=(8, 0))
+            lab('원고마다 정확히 1번 나와야 하는 문구 (한 줄에 하나)')
+            rv['once'] = tk.Text(f, font=(F, 9), height=3, relief=tk.FLAT, bg=C['bg'], padx=8, pady=4)
+            rv['once'].insert('1.0', '\n'.join(r.get('원고당_정확히1회', [])))
+            rv['once'].pack(fill=tk.X, pady=(4, 0))
+            lab('원고에 나오면 안 되는 문구 (한 줄에 하나)')
+            rv['ban'] = tk.Text(f, font=(F, 9), height=6, relief=tk.FLAT, bg=C['bg'], padx=8, pady=4)
+            rv['ban'].insert('1.0', '\n'.join(r.get('금지문구', [])))
+            rv['ban'].pack(fill=tk.X, pady=(4, 0))
+            row = tk.Frame(f, bg=C['white']); row.pack(fill=tk.X, pady=(12, 0))
+            for key, text, unit, k2 in [('title', '제목 최대', '자 (끝 결과 괄호 제외)', '제목_최대글자'),
+                                        ('body', '    본문 최소', '자 (0 = 검사 안 함)', '본문_최소글자')]:
+                tk.Label(row, text=text, font=(F, 9, 'bold'), bg=C['white']).pack(side=tk.LEFT)
+                e = tk.Entry(row, width=6, font=(F, 9), relief=tk.FLAT, bg=C['bg'], justify='center')
+                e.insert(0, str(r.get(k2, 0) or 0)); e.pack(side=tk.LEFT, padx=6, ipady=3)
+                tk.Label(row, text=unit, font=(F, 8), bg=C['white'], fg='#94a3b8').pack(side=tk.LEFT)
+                rv[key] = e
+            rv['case'] = tk.BooleanVar(value=bool(r.get('사건번호_노출금지', True)))
+            tk.Checkbutton(f, text='엑셀 사건번호가 원고에 나오면 걸리게', variable=rv['case'], font=(F, 9),
+                           bg=C['white'], activebackground=C['white'], selectcolor=C['white']
+                           ).pack(anchor='w', pady=(10, 0))
+
+        def save_rules(p):
+            if not (rv.get('once') and rv['once'].winfo_exists()):
+                return
+            lines = lambda t: [x.strip() for x in t.get('1.0', tk.END).split('\n') if x.strip()]
+            num = lambda e: max(0, int(e.get())) if e.get().strip().isdigit() else 0
+            rules = dict(p.settings.get('검사', {}))
+            rules.update({'원고당_정확히1회': lines(rv['once']), '금지문구': lines(rv['ban']),
+                          '제목_최대글자': num(rv['title']), '본문_최소글자': num(rv['body']),
+                          '사건번호_노출금지': bool(rv['case'].get())})
+            proj.save_settings(p, {'검사': rules})
+
+        def auto_rules(p, then_open=False):
+            acc = self.account_var.get()
+            acc = 1 if acc == 'both' else int(acc)
+            if rv.get('status') and rv['status'].winfo_exists():
+                rv['status'].config(text='지침 읽는 중… (1분 정도)', fg=C['subtext'])
+            self._ai_log_msg(f'{p.name}: 지침에서 검사 규칙 만드는 중…', 'inf')
+            def work():
+                try:
+                    r = generator.extract_rules(p, account=acc)
+                except Exception as e:
+                    msg = str(e)
+                    self._ui(lambda: (rv.get('status') and rv['status'].winfo_exists() and
+                                      rv['status'].config(text=f'❌ {msg[:60]}', fg=C['red']),
+                                      self._ai_log_msg(f'검사 규칙 만들기 실패: {msg}', 'err')))
+                    return
+                def done():
+                    rules = dict(p.settings.get('검사', {})); rules.update(r)
+                    proj.save_settings(p, {'검사': rules})
+                    self._ai_log_msg(f'{p.name}: 검사 규칙을 지침에 맞게 새로 만들었습니다', 'ok')
+                    if w.winfo_exists():
+                        st['cur'] = None
+                        refresh(('rules', p.name, None))
+                        if rv.get('status') and rv['status'].winfo_exists():
+                            rv['status'].config(text='✅ 지침에 맞게 채웠습니다. 확인 후 필요하면 고치세요', fg=C['green'])
+                self._ui(done)
+            threading.Thread(target=work, daemon=True).start()
+
+        def offer_rules(p):
+            if p and messagebox.askyesno('검사 규칙', '지침이 바뀌었습니다.\n자동 검사 규칙도 새 지침에 맞게 자동으로 만들까요?\n(1분 정도, 사용량 조금)',
+                                         parent=w):
+                auto_rules(p)
 
         def on_select(_=None):
             sel = lb.curselection()
-            if not sel:
-                return
-            name = lb.get(sel[0]).replace('★ ', '').strip()
-            if name.startswith('⚙'):
-                name = RULES
-            if name != st['cur']:
-                open_item(name)
+            if sel and st['rows'][sel[0]] != st['cur']:
+                open_item(st['rows'][sel[0]])
         lb.bind('<<ListboxSelect>>', on_select)
 
+        # 버튼
+        def cur_project():
+            return get_p(st['cur'][1]) if st['cur'] else None
+
+        def new_guide():
+            from tkinter import simpledialog
+            name = simpledialog.askstring('새 지침', '지침 이름\n예) 오엔_블로그칼럼', parent=w)
+            if not name:
+                return
+            try:
+                p = proj.create_project(name)
+            except Exception as e:
+                messagebox.showerror('새 지침', str(e), parent=w); return
+            self._refresh_projects()
+            st['cur'] = None
+            refresh(('file', p.name, proj.MAIN_GUIDE))
+            messagebox.showinfo('새 지침', '새 지침을 만들었습니다.\n지침 내용을 복사(Ctrl+C)한 뒤 [복사해 둔 내용으로 전체 바꾸기]를 누르세요.',
+                                parent=w)
+
         def new_file():
+            p = cur_project()
+            if not p:
+                return
             from tkinter import simpledialog
             name = simpledialog.askstring('새 파일', '파일 이름 (예: 세부지침)', parent=w)
             if not name:
@@ -1932,15 +2105,19 @@ class OneNoteExporterGUI:
             if os.path.exists(path):
                 messagebox.showwarning('새 파일', '같은 이름의 파일이 있습니다.', parent=w); return
             save_cur()
-            open(path, 'w', encoding='utf-8').close()
-            refresh(name)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(os.path.splitext(name)[0] + '\n')
+            st['cur'] = None
+            refresh(('file', p.name, name))
 
         def import_files():
-            paths = filedialog.askopenfilenames(parent=w, title='지침·소스 파일 가져오기',
+            p = cur_project()
+            if not p:
+                return
+            paths = filedialog.askopenfilenames(parent=w, title='지침·참고 파일 가져오기',
                                                 filetypes=[('텍스트', '*.md *.txt'), ('전체', '*.*')])
             last = None
             for src in paths:
-                txt = proj._read_text(src)
                 name = os.path.basename(src)
                 if not name.lower().endswith(('.md', '.txt')):
                     name = os.path.splitext(name)[0] + '.md'
@@ -1949,80 +2126,52 @@ class OneNoteExporterGUI:
                                                                     parent=w):
                     continue
                 with open(dst, 'w', encoding='utf-8') as f:
-                    f.write(txt)
+                    f.write(proj._read_text(src))
                 last = name
             if last:
-                save_cur(); refresh(last)
+                save_cur(); st['cur'] = None
+                refresh(('file', p.name, last))
+                offer_rules(p)
 
-        def delete_file():
+        def delete_item():
             cur = st['cur']
-            if not cur or cur == RULES:
+            if not cur:
                 return
-            if cur == proj.MAIN_GUIDE:
-                messagebox.showinfo('삭제', '메인 지침(지침.md)은 지울 수 없습니다.\n내용을 바꾸려면 [복사해 둔 내용으로 전체 바꾸기]를 쓰세요.',
-                                    parent=w); return
-            if not messagebox.askyesno('삭제', f'{cur} 을(를) 삭제할까요?', parent=w):
-                return
-            os.remove(os.path.join(p.folder, cur))
-            st['cur'] = None; st['dirty'] = False
-            refresh(proj.MAIN_GUIDE)
+            kind, pname, fn = cur
+            p = get_p(pname)
+            if kind == 'project':
+                if self.generating:
+                    messagebox.showwarning('삭제', '원고 생성 중에는 지울 수 없습니다.', parent=w); return
+                if not messagebox.askyesno('지침 삭제', f'지침 "{pname}" 전체(파일·설정)를 삭제할까요?\n되돌릴 수 없습니다.',
+                                           parent=w):
+                    return
+                proj.delete_project(p)
+                st['cur'] = None
+                self._refresh_projects()
+                refresh()
+            elif kind == 'file':
+                if fn == proj.MAIN_GUIDE:
+                    messagebox.showinfo('삭제', '메인 지침은 지울 수 없습니다.\n지침 전체를 지우려면 지침 이름(■)을 고르고 삭제하세요.',
+                                        parent=w); return
+                if not messagebox.askyesno('삭제', f'참고 파일 "{proj.file_title(os.path.join(p.folder, fn), 40)}"을(를) 삭제할까요?',
+                                           parent=w):
+                    return
+                os.remove(os.path.join(p.folder, fn))
+                st['cur'] = None; st['dirty'] = False
+                refresh(('project', pname, None))
 
-        for t, cmd in [('+ 새 파일', new_file), ('가져오기', import_files), ('삭제', delete_file)]:
+        for t, cmd in [('+ 새 지침', new_guide), ('+ 파일', new_file), ('가져오기', import_files)]:
             self._small_btn(lbtn, t, cmd).pack(side=tk.LEFT, padx=(0, 4))
-
-        # 검사 규칙 폼
-        rv = {}
-
-        def build_rules():
-            for c in rules_f.winfo_children():
-                c.destroy()
-            r = p.settings.get('검사', {})
-            def lab(t, sub=''):
-                tk.Label(rules_f, text=t, font=(F, 9, 'bold'), bg=C['white'], fg=C['text']
-                         ).pack(anchor='w', pady=(10, 0))
-                if sub:
-                    tk.Label(rules_f, text=sub, font=(F, 8), bg=C['white'], fg='#94a3b8').pack(anchor='w')
-            lab('원고마다 정확히 1번 나와야 하는 문구', '한 줄에 하나')
-            rv['once'] = tk.Text(rules_f, font=(F, 9), height=3, relief=tk.FLAT, bg=C['bg'], padx=8, pady=4)
-            rv['once'].insert('1.0', '\n'.join(r.get('원고당_정확히1회', [])))
-            rv['once'].pack(fill=tk.X, pady=(4, 0))
-            lab('원고에 나오면 안 되는 문구', '한 줄에 하나')
-            rv['ban'] = tk.Text(rules_f, font=(F, 9), height=3, relief=tk.FLAT, bg=C['bg'], padx=8, pady=4)
-            rv['ban'].insert('1.0', '\n'.join(r.get('금지문구', [])))
-            rv['ban'].pack(fill=tk.X, pady=(4, 0))
-            row = tk.Frame(rules_f, bg=C['white']); row.pack(fill=tk.X, pady=(14, 0))
-            for key, text, unit in [('title', '제목 최대', '자 (끝의 결과 괄호 빼고)'),
-                                    ('body', '   본문 최소', '자 (제목·소제목·표·목록·해시태그·공백 빼고)')]:
-                tk.Label(row, text=text, font=(F, 9, 'bold'), bg=C['white'], fg=C['text']).pack(side=tk.LEFT)
-                e = tk.Entry(row, width=6, font=(F, 9), relief=tk.FLAT, bg=C['bg'], justify='center')
-                e.insert(0, str(r.get('제목_최대글자' if key == 'title' else '본문_최소글자', 0) or 0))
-                e.pack(side=tk.LEFT, padx=6, ipady=3)
-                tk.Label(row, text=unit, font=(F, 8), bg=C['white'], fg='#94a3b8').pack(side=tk.LEFT)
-                rv[key] = e
-            rv['case'] = tk.BooleanVar(value=bool(r.get('사건번호_노출금지', True)))
-            tk.Checkbutton(rules_f, text='엑셀 사건번호가 원고에 나오면 걸리게', variable=rv['case'],
-                           font=(F, 9), bg=C['white'], activebackground=C['white'],
-                           selectcolor=C['white']).pack(anchor='w', pady=(12, 0))
-            tk.Label(rules_f, text='· 0이면 그 항목은 검사하지 않습니다\n'
-                                   '· 생성 후 이 규칙에 걸린 원고는 그 편만 자동으로 다시 씁니다 (AI 생성 창 옵션)\n'
-                                   '· 지침 내용을 바꾸면 여기 규칙도 맞춰 주세요 (안 맞으면 멀쩡한 원고를 다시 써서 사용량 낭비)',
-                     font=(F, 8), bg=C['white'], fg='#94a3b8', justify='left').pack(anchor='w', pady=(14, 0))
-
-        def save_rules():
-            if not rv or not rv['once'].winfo_exists():
-                return
-            lines = lambda t: [x.strip() for x in t.get('1.0', tk.END).split('\n') if x.strip()]
-            num = lambda e: max(0, int(e.get())) if e.get().strip().isdigit() else 0
-            rules = dict(p.settings.get('검사', {}))
-            rules.update({'원고당_정확히1회': lines(rv['once']), '금지문구': lines(rv['ban']),
-                          '제목_최대글자': num(rv['title']), '본문_최소글자': num(rv['body']),
-                          '사건번호_노출금지': bool(rv['case'].get())})
-            proj.save_settings(p, {'검사': rules})
+        self._small_btn(lbtn2, '삭제', delete_item).pack(side=tk.LEFT)
+        tk.Label(lbtn2, text='고른 항목(지침 또는 파일)을 삭제', font=(F, 8), bg=C['white'],
+                 fg='#94a3b8').pack(side=tk.LEFT, padx=6)
 
         def close():
             save_cur(); w.destroy()
+            self._refresh_projects()
         w.protocol('WM_DELETE_WINDOW', close)
-        refresh(proj.MAIN_GUIDE)
+        cp = self._current_project()
+        refresh(('project', cp.name, None) if cp else None)
 
     # ── Claude Code 설치 / 로그인 ──
 

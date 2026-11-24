@@ -229,7 +229,7 @@ def generate(project, case_text, stop_flag=None, account=None, progress=None, si
     system = project.build_system_prompt(single=single)
     s = project.settings
     opts = dict(model=(s.get('모델') or '').strip() or None,
-                effort=(s.get('effort') or '').strip() or None,
+                effort='medium',   # 항상 기본 모드 (품질 유지 + 사용량 절약, 실측 기준)
                 web_search=bool(s.get('웹검색')), account=account, progress=progress)
     fd, sys_path = tempfile.mkstemp(prefix='onenote_guide_', suffix='.md')
     try:
@@ -368,3 +368,39 @@ def rewrite_one(project, case_text, num, old_article, other_titles, problems=Non
     m = re.search(r'(?m)^#[ \t]+\d+[ \t]*$', text)
     body = text[m.end():] if m else text
     return f'# {num}\n' + body.strip() + '\n'
+
+
+def extract_rules(project, account=1):
+    """지침을 읽고 기계적으로 검사할 수 있는 규칙만 뽑는다 (지침 바꿀 때 1번, 사용량 적게)"""
+    guide = project.build_system_prompt()
+    fd, path = tempfile.mkstemp(suffix='.md')
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.write(
+            '너는 원고 작성 지침에서 "프로그램이 글자 그대로 검사할 수 있는 규칙"만 뽑아 JSON으로 출력한다.\n'
+            '출력은 JSON 객체 하나뿐이다. 설명·코드블록 표시 금지.\n'
+            '{"원고당_정확히1회": [..], "금지문구": [..], "제목_최대글자": 숫자, "본문_최소글자": 숫자}\n'
+            '- 원고당_정확히1회: 원고 1편에 정확히 1번 나와야 한다고 지침이 명시한 고정 문자열. '
+            '{CASE_CRIME} 같은 변수가 들어간 문구는 변수 앞의 고정 부분만 (예: "법률사무소 니케의").\n'
+            '- 금지문구: 원고에 나오면 안 된다고 지침이 명시한 고정 문자열 (광고 금지어, 내부 라벨, 금지 표식 등). '
+            '평범한 단어라 정상 문장에도 자주 나올 것은 빼라. 최대 25개.\n'
+            '- 제목_최대글자: 제목 글자 수 상한 (끝의 결과 괄호를 빼고 센다는 기준이 있으면 그 숫자). 없으면 0.\n'
+            '- 본문_최소글자: 본문 최소 글자 수. 없으면 0.\n'
+            '- 지침에 명시되지 않은 규칙은 만들지 마라.')
+    try:
+        out = call_claude_cli('<지침>\n' + guide + '\n</지침>', timeout=600, system_file=path,
+                              effort='low', account=account)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    m = re.search(r'\{[\s\S]*\}', out)
+    if not m:
+        raise AIError('규칙을 읽지 못했습니다')
+    data = json.loads(m.group())
+    clean = lambda xs: [str(x).strip() for x in (xs or []) if str(x).strip()][:30]
+    num = lambda v: max(0, int(v)) if str(v).strip().isdigit() else 0
+    return {'원고당_정확히1회': clean(data.get('원고당_정확히1회')),
+            '금지문구': clean(data.get('금지문구')),
+            '제목_최대글자': num(data.get('제목_최대글자', 0)),
+            '본문_최소글자': num(data.get('본문_최소글자', 0))}

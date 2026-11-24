@@ -237,3 +237,28 @@ def save_settings(project, updates):
     if changed:
         with open(p, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def file_title(path, limit=30):
+    """파일의 첫 줄(제목)을 이름으로 보여주기 위해 꺼낸다"""
+    for ln in _read_text(path).splitlines():
+        t = re.sub(r'^[#\s*]+', '', ln).strip().strip('*').strip()
+        if t:
+            return t if len(t) <= limit else t[:limit] + '…'
+    return '(빈 파일)'
+
+
+def rename_project(project, new_name):
+    new_name = re.sub(r'[\\/:*?"<>|]', '_', (new_name or '').strip())
+    if not new_name:
+        raise ValueError('이름을 입력하세요.')
+    dst = os.path.join(PROJECTS_DIR, new_name)
+    if os.path.exists(dst):
+        raise ValueError('같은 이름의 지침이 이미 있습니다.')
+    os.rename(project.folder, dst)
+    return Project(dst)
+
+
+def delete_project(project):
+    import shutil
+    shutil.rmtree(project.folder)
