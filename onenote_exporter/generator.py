@@ -11,7 +11,7 @@ import tempfile
 import re
 import time
 
-from app_config import CONFIG, ACCOUNT2_DIR
+from app_config import CONFIG, ACCOUNT2_DIR, account_dir
 
 
 class AIError(Exception):
@@ -55,8 +55,18 @@ def _account_env(account):
     # API 키가 환경변수에 있으면 구독 대신 API로 과금되므로 제거
     env.pop('ANTHROPIC_API_KEY', None)
     env.pop('ANTHROPIC_AUTH_TOKEN', None)
-    # 계정 2: 로그인 정보를 별도 폴더에 두고 그 폴더로 실행
-    if str(account or 1) == '2':
+    n = '2' if str(account or 1) == '2' else '1'
+    token = get_token(n)
+    if token:
+        # 장기 토큰: 계정마다 자기 토큰 + 자기 폴더 → 서로 로그아웃시키는 일이 없음
+        env['CLAUDE_CODE_OAUTH_TOKEN'] = token
+        d = account_dir(n)
+        os.makedirs(d, exist_ok=True)
+        env['CLAUDE_CONFIG_DIR'] = d
+        return env
+    env.pop('CLAUDE_CODE_OAUTH_TOKEN', None)
+    # (토큰 없을 때 예전 방식) 계정 2: 로그인 정보를 별도 폴더에 두고 그 폴더로 실행
+    if n == '2':
         os.makedirs(ACCOUNT2_DIR, exist_ok=True)
         env['CLAUDE_CONFIG_DIR'] = ACCOUNT2_DIR
     else:
@@ -64,11 +74,17 @@ def _account_env(account):
     return env
 
 
+def get_token(n):
+    return (CONFIG.get(f'token_{n}') or '').strip()
+
+
 def check_login(account):
     """사용량을 쓰지 않고 로그인 상태만 확인. (로그인됨 여부, 표시용 문구)"""
     exe = find_claude_cli()
     if not exe:
         return False, 'Claude Code 없음'
+    if get_token('2' if str(account) == '2' else '1'):
+        return True, '토큰 연결됨'
     try:
         r = subprocess.run([exe, 'auth', 'status', '--json'], capture_output=True, text=True,
                            encoding='utf-8', errors='replace', timeout=30,
@@ -238,6 +254,54 @@ def generate(project, case_text, stop_flag=None, account=None, progress=None, si
     # 혹시 원고 앞에 설명이 붙으면 첫 '# 1' 앞부분은 버린다
     m = re.search(r'(?m)^#[ \t]+1[ \t]*$', text)
     return text[m.start():] if m else text
+
+
+def clean_token(raw):
+    """복사해 온 토큰 정리 (공백·줄바꿈 제거). 형식이 아니면 ''"""
+    t = re.sub(r'\s+', '', raw or '')
+    m = re.search(r'sk-ant-oat\d*-[A-Za-z0-9_\-]+', t)
+    return m.group() if m else ''
+
+
+def verify_account(account):
+    """아주 짧은 요청으로 실제로 글을 쓸 수 있는지 확인 (사용량 거의 안 씀)"""
+    fd, path = tempfile.mkstemp(suffix='.md')
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.write('한 단어로만 답하라.')
+    try:
+        call_claude_cli('확인', timeout=120, system_file=path, effort='low', account=account)
+        return True, '연결 확인됨'
+    except LimitError:
+        return True, '연결됨 (지금은 한도 도달)'
+    except Exception as e:
+        return False, str(e)[:120]
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def open_token_setup(account):
+    """장기 토큰 발급 창 (claude setup-token). 브라우저에서 그 계정으로 로그인하면 토큰이 화면에 나온다."""
+    import sys
+    if not sys.platform.startswith('win'):
+        raise AIError('Windows에서만 지원합니다.')
+    exe = find_claude_cli()
+    if not exe:
+        raise AIError('Claude Code가 설치되어 있지 않습니다. 먼저 설정 → [Claude Code 설치하기]를 누르세요.')
+    d = account_dir(account)
+    os.makedirs(d, exist_ok=True)
+    script = (
+        "$env:CLAUDE_CONFIG_DIR = '" + d.replace("'", "''") + "'; "
+        "Remove-Item Env:CLAUDE_CODE_OAUTH_TOKEN -ErrorAction SilentlyContinue; "
+        f"Write-Host '[계정 {account}] 브라우저가 열리면 계정 {account}로 로그인하고 승인하세요.' -ForegroundColor Green; "
+        "Write-Host '브라우저가 다른 계정으로 로그인돼 있으면, 아래에 나오는 주소를 복사해 시크릿 창에 붙여넣으세요.' -ForegroundColor Yellow; "
+        "Write-Host '끝나면 sk-ant-oat 로 시작하는 토큰이 나옵니다. 그 토큰을 드래그해 복사(Ctrl+C) → 매크로에 붙여넣기' -ForegroundColor Green; "
+        "Write-Host ''; "
+        "& '" + exe.replace("'", "''") + "' setup-token")
+    subprocess.Popen(['powershell', '-NoExit', '-ExecutionPolicy', 'Bypass', '-Command', script],
+                     creationflags=getattr(subprocess, 'CREATE_NEW_CONSOLE', 0))
 
 
 def open_login(account):

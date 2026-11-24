@@ -23,6 +23,9 @@ OUTPUT_DIR    = os.path.join(APP_DIR, 'output')
 USAGE_LOG     = os.path.join(APP_DIR, '사용기록.csv')
 # 두 번째 Claude 계정의 로그인 정보가 저장되는 폴더 (첫 번째 계정은 Claude Code 기본 위치)
 ACCOUNT2_DIR  = os.path.join(APP_DIR, 'claude_account2')
+# 토큰으로 연결한 계정은 계정마다 따로 쓰는 작업 폴더 (로그인 정보끼리 절대 안 섞이게)
+def account_dir(n):
+    return os.path.join(APP_DIR, f'claude_account{n}')
 
 DEFAULTS = {
     'claude_model': '',         # 비우면 Claude Code 기본값. 예: sonnet / opus
@@ -33,6 +36,8 @@ DEFAULTS = {
     'auto_export': True,        # 원고 생성 후 바로 OneNote로 내보내기
     'account': 1,               # 원고 작성에 쓸 Claude 계정 (1 또는 2)
     'last_project': '',
+    'token_1': '',              # 계정 1 장기 토큰 (claude setup-token) — config.json은 남에게 주지 말 것
+    'token_2': '',
 }
 
 CONFIG = dict(DEFAULTS)

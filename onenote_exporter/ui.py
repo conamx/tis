@@ -770,7 +770,7 @@ class OneNoteExporterGUI:
             lb = tk.Label(st, text='● 확인 중', font=(F, 8), bg=C['white'], fg='#94a3b8')
             lb.pack(side=tk.LEFT, padx=(4, 4))
             self.acc_status[n] = lb
-            tk.Button(st, text='로그인', command=lambda n=n: self._login_account(n), font=(F, 8),
+            tk.Button(st, text='연결', command=lambda n=n: self._token_dialog(n), font=(F, 8),
                       bg=C['bg'], fg=C['subtext'], activebackground=C['light'], relief=tk.FLAT,
                       bd=0, padx=6, cursor='hand2').pack(side=tk.LEFT, padx=(0, 14))
         tk.Button(st, text='↻ 다시 확인', command=self._check_accounts, font=(F, 8),
@@ -977,6 +977,76 @@ class OneNoteExporterGUI:
         self.acc_status[n].config(text='● ' + ' · '.join(parts),
                                   fg=(C['green'] if ok and u.get('status') != 'rejected' else
                                       C['orange'] if ok else C['red']))
+
+    def _token_dialog(self, n):
+        """계정 연결: 장기 토큰(1년)을 발급받아 붙여넣기. 계정끼리 서로 로그아웃시키지 않음."""
+        if not generator.find_claude_cli():
+            self._offer_install(); return
+        w = tk.Toplevel(self.ai_win)
+        w.title(f'계정 {n} 연결')
+        w.configure(bg=C['bg'])
+        w.transient(self.ai_win)
+        w.resizable(False, False)
+        card = self._card(w, f'계정 {n} 연결 (한 번만 하면 약 1년 유지)')
+        b = tk.Frame(card, bg=C['white'])
+        b.pack(fill=tk.X, padx=12, pady=(8, 12))
+        step = lambda r, t: tk.Label(b, text=t, font=(F, 9), bg=C['white'], fg=C['text'],
+                                     justify='left', anchor='w').grid(row=r, column=0, columnspan=3,
+                                                                      sticky='w', pady=(6, 2))
+        step(0, '① 아래 버튼 → 검은 창이 뜨고 브라우저가 열립니다')
+        def open_setup():
+            try:
+                generator.open_token_setup(n)
+            except Exception as e:
+                messagebox.showerror('연결', str(e), parent=w)
+        self._small_btn(b, '토큰 발급 창 열기', open_setup).grid(row=1, column=0, sticky='w')
+        tk.Label(b, text=f'브라우저에서 계정 {n}로 로그인 → 승인\n'
+                         '(다른 계정으로 로그인돼 있으면 검은 창의 주소를 시크릿 창에 붙여넣기)',
+                 font=(F, 8), bg=C['white'], fg='#94a3b8', justify='left'
+                 ).grid(row=2, column=0, columnspan=3, sticky='w', pady=(4, 0))
+        step(3, '② 검은 창에 나온 sk-ant-oat… 토큰을 복사해서 붙여넣기')
+        ent = tk.Entry(b, font=(F, 9), width=40, relief=tk.FLAT, bg=C['bg'], show='•')
+        ent.grid(row=4, column=0, sticky='w', ipady=4)
+        if generator.get_token(n):
+            ent.insert(0, generator.get_token(n))
+        def paste():
+            try:
+                ent.delete(0, tk.END); ent.insert(0, w.clipboard_get())
+            except Exception:
+                pass
+        self._small_btn(b, '붙여넣기', paste).grid(row=4, column=1, padx=(6, 0))
+        status = tk.Label(b, text='', font=(F, 9), bg=C['white'], fg=C['subtext'],
+                          wraplength=380, justify='left')
+        status.grid(row=6, column=0, columnspan=3, sticky='w', pady=(8, 0))
+
+        def save():
+            tok = generator.clean_token(ent.get())
+            if not tok:
+                status.config(text='❌ sk-ant-oat 로 시작하는 토큰이 아닙니다. 검은 창의 토큰 전체를 복사하세요.',
+                              fg=C['red']); return
+            CONFIG[f'token_{n}'] = tok
+            app_config.save_config()
+            status.config(text='확인 중… (10초 정도)', fg=C['subtext'])
+            def work():
+                ok, msg = generator.verify_account(n)
+                self._acc_login[n] = (ok, '토큰 연결됨' if ok else '토큰 오류')
+                self._ui(lambda: (status.winfo_exists() and status.config(
+                    text=('✅ ' if ok else '❌ ') + msg, fg=C['green'] if ok else C['red']),
+                    self._show_acc(n)))
+            threading.Thread(target=work, daemon=True).start()
+
+        def remove():
+            CONFIG[f'token_{n}'] = ''
+            app_config.save_config()
+            ent.delete(0, tk.END)
+            status.config(text='연결을 해제했습니다.', fg=C['subtext'])
+            self._check_accounts()
+
+        bf = tk.Frame(w, bg=C['bg'])
+        bf.pack(fill=tk.X, padx=12, pady=10)
+        _btn(bf, '저장하고 확인', save, bg=C['accent'], fs=10, px=20, py=6).pack(side=tk.RIGHT)
+        tk.Button(bf, text='연결 해제', command=remove, font=(F, 9), bg=C['light'],
+                  relief=tk.FLAT, padx=12, pady=5, cursor='hand2').pack(side=tk.RIGHT, padx=6)
 
     def _login_account(self, n):
         if not generator.find_claude_cli():
