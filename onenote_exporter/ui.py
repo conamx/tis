@@ -97,6 +97,40 @@ C = {
 F = '맑은 고딕'
 
 
+# 접두어·키워드에 쓸 수 있는 자리표시 → 글마다 자동으로 채워짐
+#   {사건번호} {범죄명} {결과1} {결과2} {시트} {날짜}(예: 11/24)
+_CASE_NO_RE = re.compile(r'\d{2,4}\s*[가-힣]{1,4}\s*\d{1,7}(?:호)?')
+
+
+def case_meta(case=None, text=''):
+    """엑셀 사례(또는 직접 입력한 사건자료)에서 자리표시 값을 만든다."""
+    if case is not None:
+        return {'사건번호': case.case_id.split('\n')[0].strip(), '범죄명': case.crime.split('\n')[0],
+                '결과1': case.result1.replace('\n', ' '), '결과2': case.result2.replace('\n', ' '),
+                '시트': case.sheet}
+    m = _CASE_NO_RE.search(text or '')
+    return {'사건번호': m.group().replace(' ', '') if m else ''}
+
+
+def fill_template(tpl, meta=None):
+    """'사건번호 : {사건번호}' → '사건번호 : 2021형제55'. 값이 없는 자리표시가 있으면 빈 문자열."""
+    if not tpl or '{' not in tpl:
+        return tpl or ''
+    now = datetime.now()
+    vals = dict(meta or {})
+    vals.setdefault('날짜', f'{now.month}/{now.day}')
+    missing = False
+
+    def sub(m):
+        nonlocal missing
+        v = (vals.get(m.group(1)) or '').strip()
+        if not v:
+            missing = True
+        return v
+    out = re.sub(r'\{([^{}]+)\}', sub, tpl)
+    return '' if missing else out
+
+
 def _btn(p, text, cmd, bg, fg='white', fs=10, px=16, py=8, **kw):
     b = tk.Button(p, text=text, command=cmd, bg=bg, fg=fg,
                   font=(F, fs, 'bold'), padx=px, pady=py,
@@ -198,7 +232,7 @@ class OneNoteExporterGUI:
         tk.Entry(cfg, textvariable=self.keyword_var, font=(F, 9),
                  width=22, relief=tk.FLAT, bg=C['bg'], insertbackground=C['text']
                  ).grid(row=2, column=1, padx=(0,3), pady=(0,8), ipady=4, sticky='w')
-        tk.Label(cfg, text='입력 시 본문 맨 위에 굵게 삽입됩니다', font=(F, 8),
+        tk.Label(cfg, text='본문 맨 위에 굵게 삽입 · {사건번호} {날짜} {범죄명} 쓰면 글마다 자동 입력', font=(F, 8),
                  bg=C['white'], fg='#94a3b8').grid(row=2, column=2, columnspan=6, padx=(6,6), pady=(0,8), sticky='w')
 
 
@@ -545,6 +579,29 @@ class OneNoteExporterGUI:
             daemon=True).start()
 
 
+    def _export_articles(self, arts, prefix, keyword, footer_presets, add_footer, progress_cb=None):
+        """글마다 자리표시({사건번호} 등)를 채워서 OneNote에 넣는다."""
+        result = {'success': 0, 'fail': 0, 'failed_nums': []}
+        for i, art in enumerate(arts, 1):
+            if progress_cb:
+                progress_cb(i, len(arts), art)
+            meta = art.get('meta') or {}
+            ok = self.onenote.create_page(art, title_prefix=fill_template(prefix, meta),
+                                          footer_presets=footer_presets,
+                                          top_keyword=fill_template(keyword, meta))
+            if ok:
+                result['success'] += 1
+            else:
+                result['fail'] += 1; result['failed_nums'].append(art.get('number', '?'))
+        if add_footer:
+            try:
+                self.onenote.create_page({'number': '0', 'title': 'ㅡ' * 20, 'focus_keyword': '',
+                                          'sub_keywords': '', 'toc': [], 'summary': '',
+                                          'sections': [], 'raw_content': ''}, title_prefix='')
+            except Exception:
+                pass
+        return result
+
     def _export_thread(self, selected, prefix, footer_presets, keyword=''):
         def cb(i, total, art):
             pct = i / total
@@ -555,10 +612,8 @@ class OneNoteExporterGUI:
             self.root.after(0, lambda: self._log(
                 f"({i}/{total}) 글 {art['number']}: {art['title'][:30]}"))
         add_footer = self.footer_var.get()
-        result = self.onenote.batch_create_pages(
-            selected, title_prefix=prefix, progress_cb=cb,
-            add_footer=add_footer, footer_presets=footer_presets,
-            top_keyword=keyword)
+        result = self._export_articles(selected, prefix, keyword, footer_presets,
+                                       add_footer, progress_cb=cb)
         self.root.after(0, lambda: self._export_done(result, len(selected)))
 
     def _export_done(self, result, total):
@@ -717,6 +772,8 @@ class OneNoteExporterGUI:
                  ).grid(row=1, column=2, sticky='w', padx=(14, 6))
         tk.Entry(ob, textvariable=self.keyword_var, font=(F, 9), width=20, relief=tk.FLAT,
                  bg=C['bg'], insertbackground=C['text']).grid(row=1, column=3, sticky='w', ipady=4)
+        tk.Label(ob, text='{사건번호} {날짜} {범죄명} {결과2} → 글마다 자동 입력', font=(F, 8),
+                 bg=C['white'], fg='#94a3b8').grid(row=1, column=4, sticky='w', padx=10)
         tk.Label(ob, text='하단 문구', font=(F, 9), bg=C['white'], fg=C['subtext'], width=7,
                  anchor='nw').grid(row=2, column=0, sticky='nw', pady=(6, 0))
         pf = tk.Frame(ob, bg=C['white'])
@@ -1236,6 +1293,9 @@ class OneNoteExporterGUI:
                     log(f'{tag}: 원고 형식을 읽지 못했습니다 → {os.path.basename(fpath)}', 'err')
                     finish(False)
                     continue
+                meta = case_meta(case, case_text)
+                for a in arts:
+                    a['meta'] = meta
                 self._ui(lambda a=arts: self._add_articles(a))
 
                 exported = True
@@ -1244,9 +1304,8 @@ class OneNoteExporterGUI:
                         key, f'{tag}  ·  OneNote에 {n}편 넣는 중…', 1.0))
                     with export_lock:
                         log(f'{tag} — OneNote로 {len(arts)}편 내보내는 중…')
-                        res = self.onenote.batch_create_pages(
-                            arts, title_prefix=opts['prefix'], add_footer=opts['add_footer'],
-                            footer_presets=opts['footers'], top_keyword=opts['keyword'])
+                        res = self._export_articles(arts, opts['prefix'], opts['keyword'],
+                                                    opts['footers'], opts['add_footer'])
                     exported = res['fail'] == 0
                     if not exported:
                         log(f"{tag} — OneNote {res['fail']}편 실패 (글 목록에서 다시 내보내기)", 'err')
