@@ -72,7 +72,7 @@ class Project:
         files.sort(key=lambda f: (f != MAIN_GUIDE, f))
         return [os.path.join(self.folder, f) for f in files]
 
-    def build_system_prompt(self):
+    def build_system_prompt(self, single=None):
         files = self.guide_files()
         if not files:
             raise RuntimeError(f"'{self.name}' 폴더에 지침 파일(.md/.txt)이 없습니다.")
@@ -87,6 +87,10 @@ class Project:
             else:
                 parts.append(f'<프로젝트_소스 파일명="{fname}">\n{text}\n</프로젝트_소스>')
         n = self.settings.get('편수', 10)
+        out_rule = (f'- 이번 응답에는 `# {single}` 원고 1편만 출력한다. 번호 줄은 `# {single}` 한 줄, '
+                    '바로 다음 줄이 제목이다. 앞뒤 인사·설명·검수표는 출력하지 않는다.') if single else (
+                    f'- 응답에는 `# 1`부터 `# {n}`까지의 원고만 출력한다. 각 번호 줄은 `# 숫자` 한 줄만 쓰고, '
+                    '바로 다음 줄이 제목이다. 앞뒤 인사·설명·검수표는 출력하지 않는다.')
         parts.append(
             '---\n'
             '[매크로 실행 규칙]\n'
@@ -94,8 +98,7 @@ class Project:
             '제공되지 않은 파일은 없는 것으로 보고 지침 본문 기준으로 작성한다.\n'
             '- 사건자료에 나오는 사람 이름(피의자·피고인·피해자·관련인 실명)은 원고에 절대 쓰지 않는다. '
             '필요하면 \'의뢰인\', \'상대방\' 등으로 바꾼다.\n'
-            f'- 응답에는 `# 1`부터 `# {n}`까지의 원고만 출력한다. 각 번호 줄은 `# 숫자` 한 줄만 쓰고, '
-            '바로 다음 줄이 제목이다. 앞뒤 인사·설명·검수표는 출력하지 않는다.'
+            + out_rule
         )
         return '\n\n'.join(parts)
 
@@ -137,23 +140,50 @@ def create_project(name):
 
 
 def check_output(text, project, case_id=''):
-    """설정.json의 '검사' 규칙으로 결과 원고를 점검해 경고 목록을 돌려준다 (자동 재생성은 하지 않음)."""
+    """설정.json의 '검사' 규칙으로 원고를 점검. 반환: [(원고번호 또는 None, 문제), ...]
+    (원고번호가 있는 문제는 그 1편만 다시 쓰면 고쳐진다)"""
     s = project.settings
     rules = s.get('검사', {})
     want = int(s.get('편수', 10) or 0)
-    warnings = []
-    parts = re.split(r'(?m)^#[ \t]+(\d+)[ \t]*$', text)
-    arts = [(parts[i], parts[i + 1]) for i in range(1, len(parts) - 1, 2)]
+    issues = []
+    arts = split_articles(text)
     if want and len(arts) != want:
-        warnings.append(f'원고 수 {len(arts)}편 (목표 {want}편)')
+        issues.append((None, f'원고 수 {len(arts)}편 (목표 {want}편)'))
     for num, body in arts:
         for phrase in rules.get('원고당_정확히1회', []):
             c = body.count(phrase)
             if c != 1:
-                warnings.append(f'# {num}: "{phrase}" {c}회 (정확히 1회여야 함)')
+                issues.append((num, f'"{phrase}" {c}회 (정확히 1회여야 함)'))
         for phrase in rules.get('금지문구', []):
             if phrase and phrase in body:
-                warnings.append(f'# {num}: 금지 문구 "{phrase}" 포함')
-    if rules.get('사건번호_노출금지') and case_id and case_id in text:
-        warnings.append(f'사건번호 {case_id} 가 원고에 노출됨')
-    return warnings
+                issues.append((num, f'금지 문구 "{phrase}" 포함'))
+        if rules.get('사건번호_노출금지') and case_id and case_id in body:
+            issues.append((num, '사건번호가 원고에 노출됨'))
+    return issues
+
+
+def split_articles(text):
+    """'# 1' ~ '# N' 원고 원문 → [(번호, 본문), ...]"""
+    parts = re.split(r'(?m)^#[ \t]+(\d+)[ \t]*$', text)
+    return [(parts[i], parts[i + 1]) for i in range(1, len(parts) - 1, 2)]
+
+
+def join_articles(arts):
+    return '\n\n'.join(f'# {n}\n{b.strip()}' for n, b in arts) + '\n'
+
+
+def save_settings(project, updates):
+    """화면에서 바꾼 값을 프로젝트 설정.json에 자동 저장 (다른 키는 그대로 둠)."""
+    p = os.path.join(project.folder, SETTINGS)
+    data = {}
+    if os.path.exists(p):
+        with open(p, encoding='utf-8') as f:
+            data = json.load(f)
+    changed = False
+    for k, v in updates.items():
+        if data.get(k) != v:
+            data[k] = v
+            changed = True
+    if changed:
+        with open(p, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)

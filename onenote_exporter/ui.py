@@ -131,6 +131,20 @@ def fill_template(tpl, meta=None):
     return '' if missing else out
 
 
+LIMIT_GRACE = 60   # 한도 초기화 시각 + 1분 뒤에 다시 시작
+
+
+def _keep_awake(on):
+    """Windows: 작업·예약 중 PC가 절전 모드로 들어가지 않게 한다."""
+    try:
+        import ctypes
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0))
+    except Exception:
+        pass
+
+
 def _btn(p, text, cmd, bg, fg='white', fs=10, px=16, py=8, **kw):
     b = tk.Button(p, text=text, command=cmd, bg=bg, fg=fg,
                   font=(F, fs, 'bold'), padx=px, pady=py,
@@ -160,6 +174,10 @@ class OneNoteExporterGUI:
         app_config.load_config()
         app_config.ensure_projects_dir()
         self.ai_win       = None
+        self._acc_login   = {}
+        self._pending_section = None
+        self._loaded_project  = None
+        self.schedule     = None    # 예약 실행 정보
         self.projects     = []
         self.cases        = {}
         self.case_rows    = {}
@@ -305,7 +323,8 @@ class OneNoteExporterGUI:
         lst_bot.pack(fill=tk.X, padx=1, pady=1)
         for t, cmd in [('✓ 전체', self._sel_all),
                         ('✗ 해제',  self._desel),
-                        ('🗑 삭제',  self._delete)]:
+                        ('🗑 삭제',  self._delete),
+                        ('↻ 다시 쓰기', self._rewrite_selected)]:
             tk.Button(lst_bot, text=t, command=cmd,
                       font=(F, 9), bg=C['light'], fg=C['text'],
                       relief=tk.FLAT, padx=12, pady=5, cursor='hand2'
@@ -590,6 +609,7 @@ class OneNoteExporterGUI:
                                           footer_presets=footer_presets,
                                           top_keyword=fill_template(keyword, meta))
             if ok:
+                art['page_id'] = getattr(self.onenote, 'last_page_id', '')
                 result['success'] += 1
             else:
                 result['fail'] += 1; result['failed_nums'].append(art.get('number', '?'))
@@ -695,7 +715,7 @@ class OneNoteExporterGUI:
         win.geometry('860x880')
         win.minsize(640, 540)
         win.configure(bg=C['bg'])
-        win.protocol('WM_DELETE_WINDOW', win.withdraw)
+        win.protocol('WM_DELETE_WINDOW', lambda: (self._save_project_ui(), win.withdraw()))
 
         # ── 프로젝트 / 입력 / 계정 ──
         card = self._card(win, '프로젝트')
@@ -722,6 +742,16 @@ class OneNoteExporterGUI:
         self.source_var = tk.StringVar(value='excel')
         self._segment(body, self.source_var, [('excel', '엑셀 사례'), ('direct', '직접 입력')],
                       self._on_source).grid(row=1, column=1, sticky='w', pady=3)
+        qf = tk.Frame(body, bg=C['white'])
+        qf.grid(row=1, column=2, sticky='w', padx=10)
+        tk.Label(qf, text='사례당', font=(F, 9), bg=C['white'], fg=C['subtext']).pack(side=tk.LEFT)
+        self.count_var = tk.StringVar(value='10')
+        tk.Entry(qf, textvariable=self.count_var, width=3, font=(F, 9), relief=tk.FLAT,
+                 bg=C['bg'], justify='center').pack(side=tk.LEFT, padx=4, ipady=3)
+        tk.Label(qf, text='편   품질', font=(F, 9), bg=C['white'], fg=C['subtext']).pack(side=tk.LEFT)
+        self.quality_var = tk.StringVar(value='medium')
+        self._segment(qf, self.quality_var, [('low', '절약'), ('medium', '기본'), ('high', '고품질')]
+                      ).pack(side=tk.LEFT, padx=(6, 0))
 
         label(2, '계정')
         acc = CONFIG.get('account') or 1
@@ -796,9 +826,21 @@ class OneNoteExporterGUI:
         self.gen_btn = _btn(run, '원고 생성', self._start_generate, bg=C['accent'], fs=10,
                             px=28, py=7)
         self.gen_btn.pack(side=tk.RIGHT)
+        tk.Button(run, text='⏰ 예약', command=self._open_schedule, font=(F, 9), bg=C['light'],
+                  fg=C['text'], relief=tk.FLAT, padx=12, pady=6, cursor='hand2'
+                  ).pack(side=tk.RIGHT, padx=(0, 6))
+        self.sched_lbl = tk.Label(run, text='', font=(F, 9), bg=C['bg'], fg=C['accent'])
+        self.sched_lbl.pack(side=tk.LEFT, padx=10)
 
         # ── 진행 상황 ──
         lc = self._card(win, '진행 상황', side=tk.BOTTOM)
+        self.wait_limit_var = tk.BooleanVar(value=True)
+        self.autofix_var = tk.BooleanVar(value=True)
+        for text, var in [('한도에 걸리면 기다렸다 이어 쓰기', self.wait_limit_var),
+                          ('검사에 걸린 원고는 그 편만 자동으로 다시 쓰기', self.autofix_var)]:
+            tk.Checkbutton(lc._top, text=text, variable=var, font=(F, 8), bg=C['bg'],
+                           fg=C['subtext'], activebackground=C['bg'], selectcolor=C['white']
+                           ).pack(side=tk.RIGHT, padx=(0, 8))
         self.prog_area = tk.Frame(lc, bg=C['white'])
         self.prog_area.pack(fill=tk.X, padx=12)
         self.prog_rows = {}
@@ -907,6 +949,8 @@ class OneNoteExporterGUI:
         if getattr(self, 'section_dd', None) and self.section_dd.winfo_exists():
             self.section_dd.set_values(['(자동)'] + list(self._section_map.keys()))
             self.section_var.set(self.section_var.get())   # 표시 갱신
+        if getattr(self, '_pending_section', None):
+            self._apply_section(self._pending_section)
 
     def _check_accounts(self):
         for n, lb in self.acc_status.items():
@@ -915,10 +959,24 @@ class OneNoteExporterGUI:
         def work():
             for n in (1, 2):
                 ok, msg = generator.check_login(n)
-                col = C['green'] if ok else C['red']
-                self._ui(lambda n=n, ok=ok, msg=msg, col=col: self.acc_status[n].winfo_exists()
-                         and self.acc_status[n].config(text=f'● {msg}', fg=col))
+                self._acc_login[n] = (ok, msg)
+                self._ui(lambda n=n: self._show_acc(n))
         threading.Thread(target=work, daemon=True).start()
+
+    def _show_acc(self, n):
+        if not (self.ai_win and self.ai_win.winfo_exists()):
+            return
+        ok, msg = self._acc_login.get(n, (False, '확인 중'))
+        u = generator.USAGE.get(str(n)) or {}
+        parts = [msg]
+        for k, lab in (('five_hour', '5시간'), ('seven_day', '7일')):
+            if u.get(k) and u[k][0] is not None:
+                parts.append(f'{lab} {int(u[k][0] * 100)}%')
+        if u.get('status') == 'rejected':
+            parts.append('한도 도달')
+        self.acc_status[n].config(text='● ' + ' · '.join(parts),
+                                  fg=(C['green'] if ok and u.get('status') != 'rejected' else
+                                      C['orange'] if ok else C['red']))
 
     def _login_account(self, n):
         if not generator.find_claude_cli():
@@ -988,7 +1046,47 @@ class OneNoteExporterGUI:
             self.project_var.set('')
         self._on_project()
 
+    def _ui_settings(self):
+        """화면 값 → 프로젝트 설정.json에 저장할 값"""
+        try:
+            n = max(1, min(30, int(self.count_var.get())))
+        except ValueError:
+            n = 10
+        return {
+            '편수': n, 'effort': self.quality_var.get(),
+            '접두어': self.prefix_var.get(), '상단키워드': self.keyword_var.get(),
+            '하단프리셋': [name for var, (name, _) in zip(self.footer_preset_vars, FOOTER_PRESETS)
+                       if var.get()],
+            '하단구분선': bool(self.footer_var.get()),
+            '원노트섹션': self.section_var.get() if self.section_var.get() != '(자동)' else '',
+            '계정': self.account_var.get(),
+            '자동내보내기': bool(self.auto_export_var.get()),
+            '자동다시쓰기': bool(self.autofix_var.get()),
+            '한도대기': bool(self.wait_limit_var.get()),
+        }
+
+    def _save_project_ui(self):
+        """지금 화면 설정을 현재 프로젝트 기본값으로 자동 저장 (따로 저장 버튼 없음)"""
+        name = getattr(self, '_loaded_project', None)
+        p = next((x for x in self.projects if x.name == name), None)
+        if not p or not (self.ai_win and self.ai_win.winfo_exists()):
+            return
+        try:
+            proj.save_settings(p, self._ui_settings())
+        except Exception as e:
+            self._log(f'설정 저장 실패: {e}', 'err')
+
+    def _apply_section(self, name):
+        if name and name in self._section_map:
+            self.section_var.set(name)
+            self._on_section(None)
+            self._pending_section = None
+        else:
+            self._pending_section = name   # 섹션 목록이 아직 안 왔으면 받은 뒤 적용
+
     def _on_project(self):
+        if getattr(self, '_loaded_project', None) and self._loaded_project != self.project_var.get():
+            self._save_project_ui()
         p = self._current_project()
         if not p:
             self.project_info.config(text='새 프로젝트를 만드세요')
@@ -1006,6 +1104,16 @@ class OneNoteExporterGUI:
         for var, (name, _) in zip(self.footer_preset_vars, FOOTER_PRESETS):
             var.set(name in wanted)
         self.direct_hint.config(text=s.get('입력안내', ''))
+        self.count_var.set(str(s.get('편수', 10)))
+        self.quality_var.set(s.get('effort') or 'medium')
+        self.footer_var.set(bool(s.get('하단구분선', False)))
+        if s.get('계정'):
+            self.account_var.set(str(s.get('계정')))
+        self.auto_export_var.set(bool(s.get('자동내보내기', True)))
+        self.autofix_var.set(bool(s.get('자동다시쓰기', True)))
+        self.wait_limit_var.set(bool(s.get('한도대기', True)))
+        self._apply_section(s.get('원노트섹션', ''))
+        self._loaded_project = p.name
         if not s.get('엑셀사용', True):
             self.source_var.set('direct')
             self._on_source()
@@ -1135,62 +1243,78 @@ class OneNoteExporterGUI:
 
     # ── 생성 ──
 
-    def _start_generate(self):
+    def _collect_jobs(self, auto_n=None):
+        """선택한 사례(또는 직접 입력) → [(제목, 사건자료, Case 또는 None)]"""
+        if self.source_var.get() == 'excel':
+            if auto_n:
+                self._fill_cases()
+                for i, (v, _) in enumerate(self.case_checks):
+                    v.set(i < auto_n)
+                self._update_pick()
+            sel = [c for v, c in self.case_checks if v.get()]
+            return [(c.crime.split('\n')[0], c.to_prompt(), c) for c in sel]
+        text = self.direct_txt.get('1.0', tk.END).strip()
+        return [('직접입력', text, None)] if len(text) >= 5 else []
+
+    def _start_generate(self, unattended=False, auto_n=None):
+        """unattended=True: 예약 실행 (확인 창 없이 바로 시작)"""
         if self.generating:
-            return
+            return False
         w = self.ai_win
+        warn = (lambda t, m: self._ai_log_msg(f'{t}: {m}', 'err')) if unattended else \
+            (lambda t, m: messagebox.showwarning(t, m, parent=w))
         p = self._current_project()
         if not p:
-            messagebox.showwarning('경고', '프로젝트를 먼저 고르세요.', parent=w); return
+            warn('경고', '프로젝트를 먼저 고르세요.'); return False
+        self._save_project_ui()
         try:
             p.build_system_prompt()
         except Exception as e:
-            messagebox.showerror('지침 오류', str(e), parent=w); return
+            warn('지침 오류', str(e)); return False
         if not generator.find_claude_cli():
-            self._offer_install()
-            return
+            if unattended:
+                warn('오류', 'Claude Code가 없습니다')
+            else:
+                self._offer_install()
+            return False
 
-        jobs = []
-        if self.source_var.get() == 'excel':
-            sel = [c for v, c in self.case_checks if v.get()]
-            if not sel:
-                messagebox.showwarning('경고', '사례를 체크하세요. (또는 [위에서 N개 선택])', parent=w)
-                return
-            jobs = [(c.crime.split('\n')[0], c.to_prompt(), c) for c in sel]
-        else:
-            text = self.direct_txt.get('1.0', tk.END).strip()
-            if len(text) < 5:
-                messagebox.showwarning('경고', '사건자료(또는 주제)를 입력하세요.', parent=w); return
-            jobs.append(('직접입력', text, None))
+        jobs = self._collect_jobs(auto_n)
+        if not jobs:
+            warn('경고', '사례를 체크하세요. (또는 [위에서 N개 선택])' if self.source_var.get() == 'excel'
+                 else '사건자료(또는 주제)를 입력하세요.')
+            return False
 
         acc = self.account_var.get()
         accounts = [1, 2] if acc == 'both' else [int(acc)]
         bad = [n for n in accounts if not generator.check_login(n)[0]]
         if bad:
-            names = ', '.join(f'계정 {n}' for n in bad)
-            messagebox.showwarning('로그인 필요', f'{names} 로그인이 필요합니다.\n[로그인] 버튼으로 로그인한 뒤 다시 시도하세요.',
-                                   parent=w)
+            warn('로그인 필요', ', '.join(f'계정 {n}' for n in bad) +
+                 ' 로그인이 필요합니다. [로그인] 버튼으로 로그인한 뒤 다시 시도하세요.')
             self._check_accounts()
-            return
-        accounts = accounts[:len(jobs)] or accounts[:1]
+            return False
+
         auto_export = self.auto_export_var.get()
-        CONFIG['auto_export'] = auto_export
-        CONFIG['account'] = acc if acc == 'both' else int(acc)
-        app_config.save_config()
         if auto_export and not self.is_connected:
-            if not messagebox.askyesno('확인', 'OneNote가 연결되지 않았습니다.\n원고만 만들고 파일로 저장할까요?',
-                                       parent=w):
-                return
-            auto_export = False
+            if unattended:
+                self.is_connected = self.onenote.connect()   # 밤새 꺼져 있었을 수 있어 다시 연결
+                auto_export = self.is_connected
+                if not auto_export:
+                    self._ai_log_msg('OneNote 연결 실패 → 원고만 파일로 저장합니다', 'warn')
+            elif not messagebox.askyesno('확인', 'OneNote가 연결되지 않았습니다.\n원고만 만들고 파일로 저장할까요?',
+                                         parent=w):
+                return False
+            else:
+                auto_export = False
 
         n = int(p.settings.get('편수', 10) or 10)
-        acc_txt = '계정 1 + 2 동시' if len(accounts) == 2 else f'계정 {accounts[0]}'
-        msg = (f'{len(jobs)}건 × {n}편 = 원고 {len(jobs) * n}편을 생성합니다.\n'
-               f'{acc_txt} · 건당 수 분 걸립니다.')
-        if auto_export:
-            msg += f'\n\n완료되는 대로 OneNote "{self.section_var.get()}"에 내보냅니다.'
-        if not messagebox.askyesno('원고 생성', msg, parent=w):
-            return
+        if not unattended:
+            acc_txt = '계정 1 + 2 동시' if len(accounts) == 2 else f'계정 {accounts[0]}'
+            msg = (f'{len(jobs)}건 × {n}편 = 원고 {len(jobs) * n}편을 생성합니다.\n'
+                   f'{acc_txt} · 건당 수 분 걸립니다.')
+            if auto_export:
+                msg += f'\n\n완료되는 대로 OneNote "{self.section_var.get()}"에 내보냅니다.'
+            if not messagebox.askyesno('원고 생성', msg, parent=w):
+                return False
 
         opts = {
             'prefix': self.prefix_var.get().strip(),
@@ -1198,14 +1322,18 @@ class OneNoteExporterGUI:
             'add_footer': self.footer_var.get(),
             'footers': [lines for var, (_, lines) in zip(self.footer_preset_vars, FOOTER_PRESETS)
                         if var.get()],
+            'autofix': self.autofix_var.get(),
+            'wait_limit': self.wait_limit_var.get(),
         }
         self.generating = True
         self.gen_stop.clear()
+        _keep_awake(True)
         self.gen_btn.config(state=tk.DISABLED, text='생성 중…')
         self.stop_btn.config(state=tk.NORMAL)
         self.export_btn.config(state=tk.DISABLED)
         threading.Thread(target=self._generate_run,
                          args=(p, jobs, accounts, auto_export, opts), daemon=True).start()
+        return True
 
     def _stop_generate(self):
         self.gen_stop.set()
@@ -1213,6 +1341,24 @@ class OneNoteExporterGUI:
 
     def _ui(self, fn):
         self.root.after(0, fn)
+
+    def _wait_limit(self, key, tag, resets_at, log):
+        """한도가 풀릴 때까지 기다림. 풀리면 True, 중지/너무 길면 False"""
+        now = time.time()
+        target = (resets_at + LIMIT_GRACE) if resets_at else now + 30 * 60   # 시각을 모르면 30분 뒤 다시 시도
+        if target - now > 12 * 3600:
+            log(f'{tag} — 한도가 {datetime.fromtimestamp(target):%m/%d %H:%M}에 풀려서 이 계정은 멈춥니다', 'err')
+            return False
+        at = datetime.fromtimestamp(target).strftime('%H:%M')
+        log(f'{tag} — 사용량 한도 도달 · {at}에 이어서 씁니다', 'warn')
+        while time.time() < target:
+            if self.gen_stop.is_set():
+                return False
+            left = int(target - time.time())
+            self._ui(lambda left=left: self._prog_set(
+                key, f'{tag}  ·  한도 대기 중 · {at}에 다시 시작 (남은 {left // 3600}시간 {left % 3600 // 60}분)', 0.0))
+            time.sleep(5)
+        return True
 
     def _generate_run(self, p, jobs, accounts, auto_export, opts):
         """계정 수만큼 작업자를 띄워 사례를 나눠 처리. OneNote 내보내기는 한 번에 하나씩."""
@@ -1238,33 +1384,44 @@ class OneNoteExporterGUI:
                 d = stats['done']
             self._ui(lambda: self.prog_status.config(text=f'생성 {d}/{total}'))
 
+        def progress_fn(key, tag, t0, total_n):
+            def on_progress(stage, txt):
+                sec = int(time.time() - t0)
+                el = f'{sec // 60}분 {sec % 60:02d}초'
+                if stage == 'think' or not txt:
+                    self._ui(lambda: self._prog_set(key, f'{tag}  ·  구상 중  ·  {el}', 0.02))
+                    return
+                k = len(re.findall(r'(?m)^#[ \t]+\d+[ \t]*$', txt))
+                k = max(1, min(k, total_n))
+                head = f'원고 {k}/{total_n}편 작성 중' if total_n > 1 else '작성 중'
+                msg = f'{tag}  ·  {head}  ·  {len(txt):,}자  ·  {el}'
+                self._ui(lambda: self._prog_set(key, msg, (k - 0.5) / total_n))
+            return on_progress
+
         def worker(account):
             who = f'계정{account} ' if multi else ''
+            key = account
             while not self.gen_stop.is_set():
                 try:
-                    idx, (title, case_text, case) = q.get_nowait()
+                    idx, job = q.get_nowait()
                 except queue.Empty:
                     return
+                title, case_text, case = job
                 tag = f'{who}[{idx}/{total}] {title}'
                 log(f'{tag} — 시작')
                 t0 = time.time()
-                key = account
-
-                def on_progress(stage, txt, tag=tag, t0=t0, key=key):
-                    sec = int(time.time() - t0)
-                    el = f'{sec // 60}분 {sec % 60:02d}초'
-                    if stage == 'think' or not txt:
-                        self._ui(lambda: self._prog_set(key, f'{tag}  ·  구상 중  ·  {el}', 0.02))
-                        return
-                    k = len(re.findall(r'(?m)^#[ \t]+\d+[ \t]*$', txt))
-                    k = max(1, min(k, per))
-                    msg = f'{tag}  ·  원고 {k}/{per}편 작성 중  ·  {len(txt):,}자  ·  {el}'
-                    self._ui(lambda: self._prog_set(key, msg, (k - 0.5) / per))
-
-                self._ui(lambda tag=tag, key=key: self._prog_set(key, f'{tag}  ·  시작 중…', 0.0))
+                self._ui(lambda tag=tag: self._prog_set(key, f'{tag}  ·  시작 중…', 0.0))
                 try:
-                    text = generator.generate(p, case_text, stop_flag=self.gen_stop,
-                                              account=account, progress=on_progress)
+                    text = generator.generate(p, case_text, stop_flag=self.gen_stop, account=account,
+                                              progress=progress_fn(key, tag, t0, per))
+                except generator.LimitError as e:
+                    self._ui(lambda: self._show_acc(account))
+                    q.put((idx, job))   # 이 사례는 다시 대기열로 (다른 계정이 먼저 가져갈 수도 있음)
+                    if opts['wait_limit'] and self._wait_limit(key, f'계정{account}', e.resets_at, log):
+                        continue
+                    log(f'계정{account} — 사용량 한도로 멈춤', 'err')
+                    self._ui(lambda: self._prog_clear(key))
+                    return
                 except Exception as e:
                     log(f'{tag} 실패: {e}', 'err')
                     partial = getattr(e, 'partial', '')
@@ -1274,36 +1431,68 @@ class OneNoteExporterGUI:
                         with open(pp, 'w', encoding='utf-8') as f:
                             f.write(partial)
                         log(f'  써진 부분까지 저장: {os.path.basename(pp)}', 'warn')
-                    self._ui(lambda key=key: self._prog_clear(key))
+                    self._ui(lambda: self._prog_clear(key))
                     finish(False)
-                    if '중지' in str(e) or '한도' in str(e) or '로그인' in str(e):
-                        return   # 이 계정은 멈추고, 다른 계정은 계속
+                    if '중지' in str(e) or '로그인' in str(e):
+                        return
                     continue
+
+                case_id = case.case_id if case else ''
+                issues = proj.check_output(text, p, case_id)
+                # 검사에 걸린 원고는 그 편만 다시 쓰기 (1회)
+                if opts['autofix']:
+                    bad = {}
+                    for num, msg in issues:
+                        if num:
+                            bad.setdefault(num, []).append(msg)
+                    if bad:
+                        arts_raw = proj.split_articles(text)
+                        titles = {n: b.strip().split('\n')[0] for n, b in arts_raw}
+                        for num, probs in bad.items():
+                            if self.gen_stop.is_set():
+                                break
+                            log(f'{tag} — # {num} 다시 쓰기 ({probs[0]})', 'warn')
+                            try:
+                                new = generator.rewrite_one(
+                                    p, case_text, num, dict(arts_raw).get(num, ''),
+                                    [t for n, t in titles.items() if n != num], probs,
+                                    stop_flag=self.gen_stop, account=account,
+                                    progress=progress_fn(key, f'{tag} # {num} 다시 쓰기', time.time(), 1))
+                                nb = proj.split_articles(new)
+                                if nb:
+                                    arts_raw = [(n, nb[0][1] if n == num else b) for n, b in arts_raw]
+                            except Exception as e:
+                                log(f'{tag} — # {num} 다시 쓰기 실패: {e}', 'err')
+                        text = proj.join_articles(arts_raw)
+                        issues = proj.check_output(text, p, case_id)
+                for num, msg in issues:
+                    log(f'  ⚠ {"# " + num + " " if num else ""}{msg}', 'warn')
 
                 stamp = datetime.now().strftime('%H%M%S')
                 safe = (case.key if case else '직접입력').replace('/', '_').replace('\\', '_')
                 fpath = os.path.join(out_dir, f'{stamp}_{safe}.md')
                 with open(fpath, 'w', encoding='utf-8') as f:
                     f.write(text)
-                for wmsg in proj.check_output(text, p, case.case_id if case else ''):
-                    log(f'  ⚠ {wmsg}', 'warn')
 
                 arts = ArticleParser.parse(text)
                 if not arts:
                     log(f'{tag}: 원고 형식을 읽지 못했습니다 → {os.path.basename(fpath)}', 'err')
+                    self._ui(lambda: self._prog_clear(key))
                     finish(False)
                     continue
                 meta = case_meta(case, case_text)
+                group = f'{stamp}_{safe}'
                 for a in arts:
                     a['meta'] = meta
+                    a['gen'] = {'project': p.name, 'case_text': case_text, 'account': account,
+                                'group': group, 'file': fpath}
                 self._ui(lambda a=arts: self._add_articles(a))
 
                 exported = True
                 if auto_export:
-                    self._ui(lambda tag=tag, key=key, n=len(arts): self._prog_set(
+                    self._ui(lambda tag=tag, n=len(arts): self._prog_set(
                         key, f'{tag}  ·  OneNote에 {n}편 넣는 중…', 1.0))
                     with export_lock:
-                        log(f'{tag} — OneNote로 {len(arts)}편 내보내는 중…')
                         res = self._export_articles(arts, opts['prefix'], opts['keyword'],
                                                     opts['footers'], opts['add_footer'])
                     exported = res['fail'] == 0
@@ -1314,7 +1503,7 @@ class OneNoteExporterGUI:
                         excel_source.record_usage(p.name, case)
                 sec = int(time.time() - t0)
                 log(f'{tag} 완료 ({len(arts)}편 · {sec // 60}분 {sec % 60:02d}초)', 'ok')
-                self._ui(lambda key=key: self._prog_clear(key))
+                self._ui(lambda: (self._prog_clear(key), self._show_acc(account)))
                 finish(True)
 
         threads = [threading.Thread(target=worker, args=(a,), daemon=True) for a in accounts]
@@ -1331,6 +1520,8 @@ class OneNoteExporterGUI:
 
     def _generate_done(self, ok, fail):
         self.generating = False
+        if not self.schedule:
+            _keep_awake(False)
         self._prog_clear()
         if self.ai_win and self.ai_win.winfo_exists():
             self.gen_btn.config(state=tk.NORMAL, text='원고 생성')
@@ -1341,6 +1532,188 @@ class OneNoteExporterGUI:
         self._ai_log_msg(f'끝: 성공 {ok}건 / 실패 {fail}건', 'ok' if not fail else 'warn')
         self._set_status(f'AI 생성 완료: {ok}건', C['green'] if not fail else C['orange'])
         self._fill_cases()
+        try:
+            self.root.bell()
+        except Exception:
+            pass
+
+    # ── 1편 다시 쓰기 (메인 화면 글 목록) ──
+
+    def _rewrite_selected(self):
+        if self.generating:
+            messagebox.showwarning('경고', '원고 생성이 끝난 뒤에 다시 쓰기를 하세요.'); return
+        sel = [i for i, v in enumerate(self.check_vars) if v.get()]
+        targets = [i for i in sel if self.articles[i].get('gen')]
+        if not sel:
+            messagebox.showwarning('경고', '다시 쓸 글을 체크하세요.'); return
+        if not targets:
+            messagebox.showwarning('경고', 'AI로 생성한 글만 다시 쓸 수 있습니다.\n(붙여넣기로 가져온 글은 사건자료 정보가 없음)')
+            return
+        replace = any(self.articles[i].get('page_id') for i in targets) and self.is_connected
+        msg = f'{len(targets)}편을 한 편씩 다시 씁니다. (편당 1~2분)'
+        if replace:
+            msg += '\n\nOneNote에 이미 넣은 글은 새 글로 바꿉니다.\n(옛 페이지는 OneNote 휴지통으로 이동)'
+        if not messagebox.askyesno('다시 쓰기', msg):
+            return
+        opts = (self.prefix_var.get().strip(), self.keyword_var.get().strip(),
+                [lines for var, (_, lines) in zip(self.footer_preset_vars, FOOTER_PRESETS) if var.get()])
+        self.generating = True
+        self.export_btn.config(state=tk.DISABLED)
+        threading.Thread(target=self._rewrite_thread, args=(targets, opts), daemon=True).start()
+
+    def _rewrite_thread(self, targets, opts):
+        prefix, keyword, footers = opts
+        done = 0
+        for k, i in enumerate(targets, 1):
+            art = self.articles[i]
+            g = art['gen']
+            p = next((x for x in proj.list_projects() if x.name == g['project']), None)
+            if not p:
+                self._ui(lambda: self._log('프로젝트를 찾을 수 없습니다', 'err')); continue
+            num = str(art.get('number', '1'))
+            siblings = [a['title'] for a in self.articles
+                        if a.get('gen', {}).get('group') == g['group'] and a is not art]
+            self._ui(lambda k=k: self._set_status(f'다시 쓰는 중 {k}/{len(targets)}…', C['orange']))
+            try:
+                old = art.get('title', '') + '\n' + art.get('raw_content', '')
+                new_text = generator.rewrite_one(p, g['case_text'], num, old,
+                                                 siblings, account=g['account'])
+            except Exception as e:
+                self._ui(lambda e=e: self._log(f'다시 쓰기 실패: {e}', 'err')); continue
+            new = ArticleParser.parse(new_text)
+            if not new:
+                self._ui(lambda: self._log('다시 쓴 원고 형식 오류', 'err')); continue
+            na = new[0]
+            na['number'] = num
+            na['meta'], na['gen'] = art.get('meta'), g
+            if art.get('page_id') and self.is_connected:
+                res = self._export_articles([na], prefix, keyword, footers, False)
+                if res['success']:
+                    self.onenote.delete_page(art['page_id'])
+            self.articles[i] = na
+            done += 1
+            # 원고 파일에도 반영
+            try:
+                with open(g['file'], encoding='utf-8') as f:
+                    raw = proj.split_articles(f.read())
+                raw = [(n, new_text.split('\n', 1)[1] if n == num else b) for n, b in raw]
+                with open(g['file'], 'w', encoding='utf-8') as f:
+                    f.write(proj.join_articles(raw))
+            except Exception:
+                pass
+        self._ui(lambda: self._rewrite_done(done, len(targets)))
+
+    def _rewrite_done(self, done, total):
+        self.generating = False
+        if self.is_connected:
+            self.export_btn.config(state=tk.NORMAL)
+        self._rebuild_checks()
+        self._set_status(f'다시 쓰기 완료: {done}/{total}편', C['green'] if done == total else C['orange'])
+        self._log(f'다시 쓰기 완료: {done}/{total}편', 'ok')
+
+    # ── 예약 실행 ──
+
+    def _open_schedule(self):
+        w = tk.Toplevel(self.ai_win)
+        w.title('예약 실행')
+        w.configure(bg=C['bg'])
+        w.transient(self.ai_win)
+        w.resizable(False, False)
+        card = self._card(w, '정해진 시간에 자동으로 원고 생성')
+        b = tk.Frame(card, bg=C['white'])
+        b.pack(fill=tk.X, padx=12, pady=(8, 12))
+        tk.Label(b, text='시작 시간', font=(F, 9), bg=C['white'], fg=C['subtext'], width=9,
+                 anchor='w').grid(row=0, column=0, sticky='w', pady=4)
+        tf = tk.Frame(b, bg=C['white'])
+        tf.grid(row=0, column=1, sticky='w')
+        hh = tk.Entry(tf, width=3, font=(F, 10), relief=tk.FLAT, bg=C['bg'], justify='center')
+        mm = tk.Entry(tf, width=3, font=(F, 10), relief=tk.FLAT, bg=C['bg'], justify='center')
+        hh.insert(0, '02'); mm.insert(0, '00')
+        hh.pack(side=tk.LEFT, ipady=3)
+        tk.Label(tf, text=':', bg=C['white']).pack(side=tk.LEFT, padx=2)
+        mm.pack(side=tk.LEFT, ipady=3)
+        tk.Label(tf, text='  (24시간, 지난 시간이면 내일)', font=(F, 8), bg=C['white'],
+                 fg='#94a3b8').pack(side=tk.LEFT)
+
+        tk.Label(b, text='무엇을', font=(F, 9), bg=C['white'], fg=C['subtext'], width=9,
+                 anchor='w').grid(row=1, column=0, sticky='nw', pady=4)
+        mode = tk.StringVar(value='auto' if self.source_var.get() == 'excel' else 'now')
+        mf = tk.Frame(b, bg=C['white'])
+        mf.grid(row=1, column=1, sticky='w')
+        af = tk.Frame(mf, bg=C['white'])
+        af.pack(anchor='w')
+        tk.Radiobutton(af, text='그 시간에 안 쓴 사례 위에서', variable=mode, value='auto',
+                       font=(F, 9), bg=C['white'], activebackground=C['white']).pack(side=tk.LEFT)
+        cnt = tk.Entry(af, width=4, font=(F, 9), relief=tk.FLAT, bg=C['bg'], justify='center')
+        cnt.insert(0, '10')
+        cnt.pack(side=tk.LEFT, ipady=2)
+        tk.Label(af, text='건', font=(F, 9), bg=C['white']).pack(side=tk.LEFT, padx=(2, 0))
+        tk.Radiobutton(mf, text='지금 체크해 둔 사례 / 입력한 내용', variable=mode, value='now',
+                       font=(F, 9), bg=C['white'], activebackground=C['white']).pack(anchor='w')
+        tk.Label(b, text='· 지금 화면의 프로젝트·계정·OneNote 설정 그대로 실행합니다\n'
+                         '· 매크로를 켜 둔 채로 두세요. 예약~작업 끝까지 PC가 절전 모드로 가지 않게 합니다\n'
+                         '· "한도에 걸리면 기다렸다 이어 쓰기"를 켜 두면 밤새 이어서 씁니다',
+                 font=(F, 8), bg=C['white'], fg='#94a3b8', justify='left'
+                 ).grid(row=2, column=0, columnspan=2, sticky='w', pady=(8, 0))
+
+        def ok():
+            try:
+                h, m = int(hh.get()), int(mm.get())
+                assert 0 <= h < 24 and 0 <= m < 60
+                n = int(cnt.get()) if mode.get() == 'auto' else None
+            except Exception:
+                messagebox.showwarning('예약', '시간(0~23 : 0~59)과 건수를 숫자로 넣으세요.', parent=w); return
+            if mode.get() == 'now' and not self._collect_jobs():
+                messagebox.showwarning('예약', '체크한 사례(또는 입력 내용)가 없습니다.', parent=w); return
+            now = datetime.now()
+            at = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if at <= now:
+                from datetime import timedelta
+                at += timedelta(days=1)
+            self._save_project_ui()
+            self.schedule = {'at': at, 'auto_n': n}
+            _keep_awake(True)
+            self._tick_schedule()
+            self._ai_log_msg(f'예약: {at:%m/%d %H:%M} · ' + (f'안 쓴 사례 {n}건' if n else '체크한 사례'), 'inf')
+            w.destroy()
+
+        def cancel():
+            self._cancel_schedule(); w.destroy()
+
+        bf = tk.Frame(w, bg=C['bg'])
+        bf.pack(fill=tk.X, padx=12, pady=10)
+        _btn(bf, '예약하기', ok, bg=C['accent'], fs=10, px=22, py=6).pack(side=tk.RIGHT)
+        if self.schedule:
+            tk.Button(bf, text='예약 취소', command=cancel, font=(F, 9), bg=C['light'],
+                      relief=tk.FLAT, padx=12, pady=5).pack(side=tk.RIGHT, padx=6)
+
+    def _cancel_schedule(self):
+        self.schedule = None
+        if hasattr(self, 'sched_lbl') and self.sched_lbl.winfo_exists():
+            self.sched_lbl.config(text='')
+        if not self.generating:
+            _keep_awake(False)
+        self._ai_log_msg('예약 취소', 'warn')
+
+    def _tick_schedule(self):
+        sc = self.schedule
+        if not sc:
+            return
+        left = (sc['at'] - datetime.now()).total_seconds()
+        if left > 0:
+            h, m = int(left // 3600), int(left % 3600 // 60)
+            if self.sched_lbl.winfo_exists():
+                self.sched_lbl.config(text=f'⏰ {sc["at"]:%H:%M} 예약 (남은 {h}시간 {m}분)  ')
+            self.root.after(20000 if left > 60 else 1000, self._tick_schedule)
+            return
+        self.schedule = None
+        self.sched_lbl.config(text='')
+        if self.ai_win:
+            self.ai_win.deiconify()
+        self._ai_log_msg('예약 시간 — 원고 생성 시작', 'ok')
+        if not self._start_generate(unattended=True, auto_n=sc['auto_n']):
+            self._ai_log_msg('예약 실행을 시작하지 못했습니다 (위 메시지 참고)', 'err')
+            _keep_awake(False)
 
     # ── Claude Code 설치 / 로그인 ──
 

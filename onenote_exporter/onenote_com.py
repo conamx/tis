@@ -138,6 +138,7 @@ class SectionInfo:
 class OneNoteManager:
     def __init__(self):
         self.section_id = ''; self.connected = False; self._sections = []
+        self.last_page_id = ''   # 마지막으로 만든 페이지 ID (다시 쓰기 때 옛 페이지 교체용)
 
     def connect(self):
         try:
@@ -409,6 +410,7 @@ class OneNoteManager:
             sf  = os.path.join(tmp, 'sid.txt')
             tf  = os.path.join(tmp, 'title.txt')
             bf  = os.path.join(tmp, 'body.xml')
+            pf  = os.path.join(tmp, 'pid.txt')
             ps1 = os.path.join(tmp, 'p.ps1')
             Path(sf).write_text(self.section_id, encoding='utf-8')
             Path(tf).write_text(title, encoding='utf-8')
@@ -422,6 +424,7 @@ class OneNoteManager:
                 "$on=New-Object -ComObject OneNote.Application\n"
                 "[string]$pageId=''\n"
                 "$on.CreateNewPage($sectionId,[ref]$pageId,0)\n"
+                "[System.IO.File]::WriteAllText("+self._q(pf)+",$pageId,[System.Text.Encoding]::UTF8)\n"
                 "[string]$xml=''\n"
                 "$on.GetPageContent($pageId,[ref]$xml,0)\n"
                 "$doc=[xml]$xml\n"
@@ -459,7 +462,32 @@ class OneNoteManager:
                 "$on.UpdatePageContent($doc.OuterXml,[DateTime]::MinValue)\n"
             )
             Path(ps1).write_text(ps, encoding='utf-8-sig')
+            self.last_page_id = ''
             self._run_ps_file(ps1, timeout=300)
+            if os.path.exists(pf):
+                self.last_page_id = Path(pf).read_text(encoding='utf-8-sig').strip()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def delete_page(self, page_id):
+        """페이지 삭제 (OneNote '삭제된 페이지'로 이동 — 필요하면 복구 가능)"""
+        if not page_id:
+            return False
+        tmp = tempfile.mkdtemp(prefix='on_del_')
+        try:
+            pgf = os.path.join(tmp, 'pg.txt')
+            ps1 = os.path.join(tmp, 'd.ps1')
+            Path(pgf).write_text(page_id, encoding='utf-8')
+            Path(ps1).write_text(
+                "$ErrorActionPreference='Stop'\n"
+                "$pageId=[System.IO.File]::ReadAllText("+self._q(pgf)+",[System.Text.Encoding]::UTF8).Trim()\n"
+                "$on=New-Object -ComObject OneNote.Application\n"
+                "$on.DeleteHierarchy($pageId,[DateTime]::MinValue,$false)\n", encoding='utf-8-sig')
+            self._run_ps_file(ps1, timeout=_PAGE_TIMEOUT)
+            return True
+        except Exception as e:
+            print(f"[OneNote] 페이지 삭제 실패: {e}")
+            return False
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

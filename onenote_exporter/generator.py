@@ -20,6 +20,18 @@ class AIError(Exception):
         self.partial = partial   # 실패 전까지 써진 글 (버리지 않고 저장용)
 
 
+class LimitError(AIError):
+    """사용량 한도. resets_at = 한도가 풀리는 시각(유닉스 초), 모르면 None"""
+    def __init__(self, msg, resets_at=None, partial=''):
+        super().__init__(msg, partial)
+        self.resets_at = resets_at
+
+
+# 계정별 마지막 사용량 정보 (Claude Code가 알려주는 값)
+#   {'five_hour': (사용률 0~1, 초기화 시각), 'seven_day': (...), 'status': 'allowed'/'rejected', 'resetsAt': ...}
+USAGE = {}
+
+
 def find_claude_cli():
     """설치된 Claude Code 실행 파일 경로 (없으면 None)"""
     custom = (CONFIG.get('claude_cli_path') or '').strip()
@@ -124,7 +136,7 @@ def call_claude_cli(prompt, stop_flag=None, timeout=None, system_file=None,
         pass
 
     started = last_cb = time.time()
-    text, result, stage, raw_tail = [], None, 'think', []
+    text, result, stage, raw_tail, limit = [], None, 'think', [], {}
     while True:
         try:
             line = lines.get(timeout=1)
@@ -154,6 +166,13 @@ def call_claude_cli(prompt, stop_flag=None, timeout=None, system_file=None,
                         stage = 'write'
             elif t == 'result':
                 result = ev
+            elif t == 'rate_limit_event':
+                limit = ev.get('rate_limit_info') or {}
+                win = limit.get('unifiedWindows') or {}
+                USAGE[str(account or 1)] = {
+                    'status': limit.get('status'), 'resetsAt': limit.get('resetsAt'),
+                    **{k: (v.get('utilization'), v.get('resetsAt')) for k, v in win.items()
+                       if isinstance(v, dict)}}
         if progress and time.time() - last_cb >= 1:
             last_cb = time.time()
             try:
@@ -162,14 +181,19 @@ def call_claude_cli(prompt, stop_flag=None, timeout=None, system_file=None,
                 pass
     proc.wait(timeout=10)
 
+    rejected = limit.get('status') == 'rejected'
     if result is None:
         msg = ((err_buf[0] if err_buf else '') or ''.join(raw_tail)).strip()[:300]
+        if rejected or 'limit' in msg.lower():
+            raise LimitError(f'사용량 한도에 걸렸습니다', limit.get('resetsAt'), ''.join(text))
         raise AIError(f'Claude Code 실행 실패 (코드 {proc.returncode}): {msg or "출력 없음"}',
                       ''.join(text))
     out = result.get('result') or ''.join(text)
     if result.get('is_error') or result.get('subtype') != 'success' or not out.strip():
         hint = ''
         low = out.lower()
+        if rejected or ('limit' in low and ('usage' in low or 'reset' in low or 'hit' in low)):
+            raise LimitError('사용량 한도에 걸렸습니다', limit.get('resetsAt'), ''.join(text))
         if 'login' in low or 'auth' in low:
             hint = ' → 로그인이 필요합니다'
         elif 'limit' in low:
@@ -179,13 +203,14 @@ def call_claude_cli(prompt, stop_flag=None, timeout=None, system_file=None,
     return out
 
 
-def generate(project, case_text, stop_flag=None, account=None, progress=None):
+def generate(project, case_text, stop_flag=None, account=None, progress=None, single=None,
+             extra=''):
     """프로젝트 지침 + 사건자료 → 원고 원문(`# 1` ~ `# N`).
 
     claude.ai 프로젝트와 같은 구조로 보낸다:
       시스템 프롬프트 = 지침 + 프로젝트 소스 파일 (Claude Code 기본 프롬프트는 쓰지 않음)
       사용자 메시지   = 사건자료만 (프로젝트 채팅창에 붙여넣던 그대로)"""
-    system = project.build_system_prompt()
+    system = project.build_system_prompt(single=single)
     s = project.settings
     opts = dict(model=(s.get('모델') or '').strip() or None,
                 effort=(s.get('effort') or '').strip() or None,
@@ -195,8 +220,8 @@ def generate(project, case_text, stop_flag=None, account=None, progress=None):
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             f.write(system)
         try:
-            text = call_claude_cli(case_text.strip(), stop_flag=stop_flag,
-                                   system_file=sys_path, **opts)
+            msg = case_text.strip() + (('\n\n' + extra.strip()) if extra else '')
+            text = call_claude_cli(msg, stop_flag=stop_flag, system_file=sys_path, **opts)
         except AIError as e:
             # 아주 오래된 Claude Code라 옵션을 모르면 예전 방식(지침을 메시지에 같이)으로 재시도
             if 'unknown option' not in str(e).lower():
@@ -258,3 +283,24 @@ def open_installer():
 def label():
     model = (CONFIG.get('claude_model') or '').strip()
     return f'Claude Code ({model})' if model else 'Claude Code'
+
+
+def rewrite_one(project, case_text, num, old_article, other_titles, problems=None,
+                stop_flag=None, account=None, progress=None):
+    """원고 1편만 다시 쓰기. 같은 사건의 다른 원고 제목을 알려줘서 겹치지 않게 한다.
+    10편을 통째로 다시 쓰는 것보다 사용량이 약 1/10."""
+    old_title = (old_article or '').strip().split('\n')[0]
+    extra = [f'[다시 쓰기 요청] 위 사건으로 이미 원고 {project.settings.get("편수", 10)}편을 썼다. '
+             f'그중 # {num} 원고 1편만 새로 써라. 출력은 `# {num}` 줄로 시작하는 원고 1편뿐이다.',
+             f'- 기존 # {num} 제목: {old_title}',
+             '- 제목 접두어 종류(전문변호사/변호사)와 원고 유형은 기존 # {0}과 같게 유지하고, '
+             '내용·구성·표현은 새로 쓴다.'.format(num)]
+    if problems:
+        extra.append('- 기존 원고의 문제(반드시 고칠 것): ' + ' / '.join(problems))
+    if other_titles:
+        extra.append('- 다른 원고 제목(겹치지 않게): ' + ' | '.join(other_titles))
+    text = generate(project, case_text, stop_flag=stop_flag, account=account,
+                    progress=progress, single=num, extra='\n'.join(extra))
+    m = re.search(r'(?m)^#[ \t]+\d+[ \t]*$', text)
+    body = text[m.end():] if m else text
+    return f'# {num}\n' + body.strip() + '\n'
