@@ -588,15 +588,18 @@ class OneNoteManager:
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def add_link(self, page_id, url, label='로톡 링크', strip_dash=False):
+    def add_link(self, page_id, url, label='로톡 링크', strip_dash=False, new_title=None):
         """페이지 본문 맨 위에 '로톡 링크: 주소' 한 줄을 넣는다 (누르면 열리는 링크).
-        strip_dash=True 면 제목 맨 앞의 'ㅡ'(업로드 전 표시)도 지운다."""
+        strip_dash=True 면 제목 맨 앞의 'ㅡ'(업로드 전 표시)도 지운다.
+        new_title 을 주면 제목을 그 글자로 바꾼다 (날짜 없는 글에 '사용 날짜 로톡' 붙일 때)."""
         if not page_id or not url:
             return False
         tmp = tempfile.mkdtemp(prefix='on_link_')
         try:
             pgf = os.path.join(tmp, 'pg.txt'); lf = os.path.join(tmp, 'l.txt'); ps1 = os.path.join(tmp, 'k.ps1')
+            tf = os.path.join(tmp, 't.txt')
             Path(pgf).write_text(page_id, encoding='utf-8')
+            Path(tf).write_text(_esc(new_title or ''), encoding='utf-8')
             u = _esc(url).replace('"', '&quot;')
             Path(lf).write_text(f"<span style='font-size:{SIZE_BODY:.1f}pt;font-weight:bold'>{_esc(label)}: </span>"
                                 f"<a href=\"{u}\"><span style='font-size:{SIZE_BODY:.1f}pt'>{_esc(url)}</span></a>",
@@ -619,7 +622,10 @@ class OneNoteManager:
                 "$t.AppendChild($doc.CreateCDataSection($line))|Out-Null\n"
                 "$oe.AppendChild($t)|Out-Null\n"
                 "$oec.PrependChild($oe)|Out-Null\n"
-                + (TITLE_DASH_PS if strip_dash else '') +
+                + (("$nt=[System.IO.File]::ReadAllText(" + self._q(tf) + ",[System.Text.Encoding]::UTF8)\n"
+                    "$tt=$doc.SelectSingleNode('//one:Title/one:OE/one:T',$mgr)\n"
+                    "if($tt -and $nt){ $tt.InnerXml=''; $tt.AppendChild($doc.CreateCDataSection($nt))|Out-Null }\n")
+                   if new_title else (TITLE_DASH_PS if strip_dash else '')) +
                 "$on.UpdatePageContent($doc.OuterXml,[DateTime]::MinValue)\n", encoding='utf-8-sig')
             self._run_ps_file(ps1, timeout=_PAGE_TIMEOUT)
             return True

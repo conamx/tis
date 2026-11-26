@@ -153,6 +153,27 @@ def title_date(title, today=None):
     return f'{mon}/{day} {wd}'
 
 
+def parse_date_label(text, today=None):
+    """'11/25', '11/25 수', '11.25' 같은 입력 → '11/25 수' (요일 자동). 잘못된 입력이면 ''"""
+    t = (text or '').strip().replace('.', '/').replace('-', '/')
+    return title_date(t + ' [', today)
+
+
+def upload_title(title, date_label):
+    """업로드 후 OneNote 제목: 앞의 'ㅡ'를 지우고, 날짜가 없으면 '사용 {날짜} 로톡'을 앞에 붙인다.
+    예) 'ㅡ 로톡 [강제추행변호사 성공사례] 같은 사정이면…' → '사용 11/25 수 로톡 [강제추행변호사 성공사례] 같은 사정이면…'
+    반환: (새 제목, 날짜를 새로 붙였는지)"""
+    t = re.sub(r'^\s*[ㅡ—–\-]+\s*', '', title or '')
+    if '[' not in t:
+        return t, False
+    head, rest = t.split('[', 1)
+    if title_date(head) or not date_label:
+        return t, False                       # 이미 날짜가 있으면 ㅡ만 지움
+    extra = re.sub(r'\s+', ' ', re.sub(r'사용|로톡', ' ', head)).strip()
+    new = f'사용 {date_label} 로톡' + (f' {extra}' if extra else '') + ' [' + rest
+    return new, True
+
+
 def clean_title(title, exclude=(), strip_result=False):
     """기록용 제목: 첫 '[' 부터 시작, 뺄 단어 제거, (선택) 끝의 결과 괄호 제거"""
     t = title or ''

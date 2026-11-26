@@ -1764,8 +1764,24 @@ class OneNoteExporterGUI:
         tk.Checkbutton(cfgr, text='끝의 결과 괄호 빼기', variable=strip_var, font=(F, 9), bg=C['white'],
                        activebackground=C['white'], selectcolor=C['white']).pack(side=tk.LEFT, padx=10)
         dash_var = tk.BooleanVar(value=bool(CONFIG.get('link_strip_dash', True)))
-        tk.Checkbutton(cfgr, text='OneNote 제목 앞 ㅡ 지우기', variable=dash_var, font=(F, 9), bg=C['white'],
+        tk.Checkbutton(cfgr, text='OneNote 제목 정리', variable=dash_var, font=(F, 9), bg=C['white'],
                        activebackground=C['white'], selectcolor=C['white']).pack(side=tk.LEFT)
+        dr = tk.Frame(top, bg=C['white']); dr.pack(fill=tk.X, padx=12, pady=(0, 8))
+        tk.Label(dr, text='날짜 없는 글에 넣을 날짜', font=(F, 9), bg=C['white'], fg=C['subtext']).pack(side=tk.LEFT)
+        _now = datetime.now()
+        date_var = tk.StringVar(value=f'{_now.month}/{_now.day}')
+        tk.Entry(dr, textvariable=date_var, font=(F, 9), width=8, relief=tk.FLAT, bg=C['bg'], justify='center'
+                 ).pack(side=tk.LEFT, padx=6, ipady=3)
+        date_lbl = tk.Label(dr, text='', font=(F, 9), bg=C['white'], fg=C['accent'])
+        date_lbl.pack(side=tk.LEFT)
+        tk.Label(dr, text="  제목 정리: 앞의 ㅡ 지우기 + 날짜가 없으면 '사용 날짜 로톡' 붙이기 "
+                          "(예: 사용 11/25 수 로톡 [○○변호사 성공사례] …)", font=(F, 8), bg=C['white'],
+                 fg='#94a3b8').pack(side=tk.LEFT)
+        def _date_show(*_):
+            d = excel_source.parse_date_label(date_var.get())
+            date_lbl.config(text=f'→ {d}' if d else '→ 날짜 형식 확인 (예: 11/25)',
+                            fg=C['accent'] if d else C['red'])
+        date_var.trace_add('write', _date_show); _date_show()
         cfgr = tk.Frame(top, bg=C['white']); cfgr.pack(fill=tk.X, padx=12, pady=(0, 8))
         xl_var = tk.StringVar(value=CONFIG.get('upload_xlsx') or app_config.UPLOAD_XLSX)
         def pick_xl():
@@ -1881,16 +1897,25 @@ class OneNoteExporterGUI:
             if not items:
                 status.config(text='새로 넣은 링크가 없습니다.', fg=C['subtext']); return
             words = []
+            set_date = excel_source.parse_date_label(date_var.get())
+            if not set_date and any(not excel_source.title_date(pg['title']) for pg, _ in items):
+                messagebox.showwarning('링크 기록', "날짜가 없는 글이 있습니다. '날짜 없는 글에 넣을 날짜'를 11/25 처럼 넣어 주세요.",
+                                       parent=w); return
+            plan = []
+            for pg, u in items:
+                new_t, added = excel_source.upload_title(pg['title'], set_date)
+                d = excel_source.title_date(pg['title']) or set_date
+                plan.append((pg, u, new_t if dash_var.get() else pg['title'], added and dash_var.get(), d))
             CONFIG.update({'lawtalk_id': id_var.get().strip(), 'link_hide_prefix': hide_var.get().strip(),
                            'title_strip_result': bool(strip_var.get()), 'link_strip_dash': bool(dash_var.get()),
                            'upload_xlsx': '' if xl_var.get() == app_config.UPLOAD_XLSX else xl_var.get()})
             app_config.save_config()
             try:
                 n = excel_source.record_upload(xl_var.get(), [
-                    {'날짜': excel_source.title_date(pg['title']),   # 제목에 적힌 날짜 (없으면 오늘)
+                    {'날짜': d,   # 제목에 적힌 날짜, 없으면 설정한 날짜
                      '아이디': id_var.get().strip(), '사건번호': pg['case_no'], 'url': u,
-                     '제목': excel_source.clean_title(pg['title'], words, strip_var.get())}
-                    for pg, u in items])
+                     '제목': excel_source.clean_title(new_t, words, strip_var.get())}
+                    for pg, u, new_t, added, d in plan])
             except PermissionError:
                 messagebox.showerror('링크 기록', f'{os.path.basename(xl_var.get())} 가 엑셀에서 열려 있어 저장하지 못했습니다.\n닫고 다시 저장하세요.', parent=w)
                 return
@@ -1901,11 +1926,12 @@ class OneNoteExporterGUI:
             status.config(text=f'엑셀에 {n}건 기록. OneNote 페이지에 넣는 중…', fg=C['orange'])
             def work():
                 ok = 0
-                for pg, u in items:
-                    if self.onenote.add_link(pg['id'], u, strip_dash=dash_var.get()):
+                for pg, u, new_t, added, d in plan:
+                    if self.onenote.add_link(pg['id'], u, strip_dash=dash_var.get(),
+                                             new_title=new_t if added else None):
                         pg['link'] = u; ok += 1
                         if dash_var.get():
-                            pg['title'] = onenote_com.strip_title_dash(pg['title'])
+                            pg['title'] = new_t
                         st['typed'].pop(pg['id'], None)
                 msg = f'엑셀 {n}건 · OneNote {ok}건 기록 완료'
                 if ok < len(items):
