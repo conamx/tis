@@ -39,7 +39,7 @@ DEFAULTS = {
     'account': 1,               # 원고 작성에 쓸 Claude 계정 (1 또는 2)
     'last_project': '',
     'lawtalk_id': '',           # 링크 기록 엑셀의 '아이디' 칸
-    'title_exclude': '',        # 링크 기록 제목에서 뺄 단어 (쉼표로 구분)
+    'link_hide_prefix': '사용',  # 링크 기록 창에서 이 글자로 시작하는 제목은 숨김 (쉼표로 여러 개)
     'title_strip_result': False,  # 링크 기록 제목에서 끝의 결과 괄호 빼기
     'upload_xlsx': '',
     'link_strip_dash': True,     # 링크 넣을 때 OneNote 제목 앞 'ㅡ' 지우기          # 링크 기록 엑셀 (비우면 exe 옆 업로드기록.xlsx)

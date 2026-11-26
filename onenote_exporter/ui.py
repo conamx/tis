@@ -1708,7 +1708,7 @@ class OneNoteExporterGUI:
         w.geometry('960x640')
         w.configure(bg=C['bg'])
         w.transient(self.root)
-        top = self._card(w, '로톡에 올린 글 주소를 붙여넣으세요 — 엑셀(업로드기록.xlsx)과 OneNote 페이지에 함께 기록')
+        top = self._card(w, '로톡에 올린 글 주소를 붙여넣으세요 — 기록 엑셀과 OneNote 페이지에 함께 기록')
         bar = tk.Frame(top, bg=C['white']); bar.pack(fill=tk.X, padx=12, pady=8)
         tk.Label(bar, text='섹션', font=(F, 9), bg=C['white'], fg=C['subtext']).pack(side=tk.LEFT)
         sec_var = tk.StringVar(value=self.section_var.get() if self.section_var.get() in self._section_map
@@ -1722,7 +1722,6 @@ class OneNoteExporterGUI:
         qe = tk.Entry(bar, textvariable=q_var, font=(F, 9), width=18, relief=tk.FLAT, bg=C['bg'])
         qe.pack(side=tk.LEFT, padx=6, ipady=3)
         self._small_btn(bar, '↻ 다시 불러오기', lambda: load()).pack(side=tk.RIGHT)
-        self._small_btn(bar, '여러 링크 한 번에 붙여넣기', lambda: paste_many()).pack(side=tk.RIGHT, padx=6)
 
         # 기록 엑셀 형식 설정 (자동 저장)
         cfgr = tk.Frame(top, bg=C['white']); cfgr.pack(fill=tk.X, padx=12, pady=(0, 8))
@@ -1730,11 +1729,13 @@ class OneNoteExporterGUI:
         id_var = tk.StringVar(value=CONFIG.get('lawtalk_id', ''))
         tk.Entry(cfgr, textvariable=id_var, font=(F, 9), width=12, relief=tk.FLAT, bg=C['bg']
                  ).pack(side=tk.LEFT, padx=(6, 12), ipady=3)
-        tk.Label(cfgr, text='제목에서 뺄 단어', font=(F, 9), bg=C['white'], fg=C['subtext']).pack(side=tk.LEFT)
-        ex_var = tk.StringVar(value=CONFIG.get('title_exclude', ''))
-        tk.Entry(cfgr, textvariable=ex_var, font=(F, 9), width=22, relief=tk.FLAT, bg=C['bg']
+        tk.Label(cfgr, text='숨길 제목', font=(F, 9), bg=C['white'], fg=C['subtext']).pack(side=tk.LEFT)
+        hide_var = tk.StringVar(value=CONFIG.get('link_hide_prefix', '사용'))
+        tk.Entry(cfgr, textvariable=hide_var, font=(F, 9), width=14, relief=tk.FLAT, bg=C['bg']
                  ).pack(side=tk.LEFT, padx=(6, 4), ipady=3)
-        tk.Label(cfgr, text='(쉼표로 구분)', font=(F, 8), bg=C['white'], fg='#94a3b8').pack(side=tk.LEFT)
+        tk.Label(cfgr, text='(이 글자로 시작하면 숨김)', font=(F, 8), bg=C['white'],
+                 fg='#94a3b8').pack(side=tk.LEFT)
+        hide_var.trace_add('write', lambda *a: show())
         strip_var = tk.BooleanVar(value=bool(CONFIG.get('title_strip_result', False)))
         tk.Checkbutton(cfgr, text='끝의 결과 괄호 빼기', variable=strip_var, font=(F, 9), bg=C['white'],
                        activebackground=C['white'], selectcolor=C['white']).pack(side=tk.LEFT, padx=10)
@@ -1744,7 +1745,8 @@ class OneNoteExporterGUI:
         cfgr = tk.Frame(top, bg=C['white']); cfgr.pack(fill=tk.X, padx=12, pady=(0, 8))
         xl_var = tk.StringVar(value=CONFIG.get('upload_xlsx') or app_config.UPLOAD_XLSX)
         def pick_xl():
-            pth = filedialog.asksaveasfilename(parent=w, title='링크를 기록할 엑셀', defaultextension='.xlsx',
+            pth = filedialog.asksaveasfilename(parent=w, title='링크를 이어서 기록할 엑셀 (기존 파일 선택 또는 새 이름)',
+                                               defaultextension='.xlsx',
                                                initialfile=os.path.basename(xl_var.get()),
                                                filetypes=[('엑셀', '*.xlsx')], confirmoverwrite=False)
             if pth:
@@ -1753,7 +1755,7 @@ class OneNoteExporterGUI:
         xl_lbl = tk.Label(cfgr, text=os.path.basename(xl_var.get()), font=(F, 9), bg=C['white'], fg=C['text'])
         xl_lbl.pack(side=tk.LEFT, padx=6)
         self._small_btn(cfgr, '바꾸기', pick_xl).pack(side=tk.LEFT)
-        tk.Label(cfgr, text='형식: 날짜 | 아이디 | 사건번호 | 제목([부터) | url · 목록 순서 = OneNote 페이지 순서',
+        tk.Label(cfgr, text='기존 엑셀을 고르면 맨 아래에 이어서 추가 (날짜 | 아이디 | 사건번호 | 제목 | url)',
                  font=(F, 8), bg=C['white'], fg='#94a3b8').pack(side=tk.LEFT, padx=10)
 
         lc = tk.Frame(w, bg=C['white'], highlightbackground=C['light'], highlightthickness=1)
@@ -1791,8 +1793,9 @@ class OneNoteExporterGUI:
             for pg in st['pages']:
                 if not pg['title'] or set(pg['title']) <= set('ㅡ-─ '):
                     continue   # 구분선 페이지
-                if pg['link']:
-                    continue   # 이미 링크가 있는 페이지는 목록에서 뺌
+                hides = [x.strip() for x in hide_var.get().split(',') if x.strip()]
+                if any(pg['title'].lstrip().startswith(h) for h in hides):
+                    continue   # 예) '사용'으로 시작 = 이미 올린 글 (ㅡ 지워진 것)
                 if q and q not in pg['title'] and q not in pg['case_no']:
                     continue
                 r = tk.Frame(inner, bg=C['white']); r.pack(fill=tk.X, pady=2)
@@ -1817,25 +1820,8 @@ class OneNoteExporterGUI:
                 rows.append((pg, e))
                 n += 1
             cv.yview_moveto(0)
-            done = sum(1 for p_ in st['pages'] if p_['link'])
-            status.config(text=f'링크 없는 페이지 {n}개 (이미 링크 있는 {done}개는 숨김)', fg=C['subtext'])
-
-        def paste_many():
-            """복사해 둔 여러 줄의 주소를 빈 칸에 위에서부터 차례로 채움"""
-            try:
-                urls = re.findall(r'https?://\S+', w.clipboard_get())
-            except Exception:
-                urls = []
-            if not urls:
-                status.config(text='복사해 둔 내용에 주소(https://…)가 없습니다.', fg=C['orange']); return
-            k = 0
-            for pg, e in rows:
-                if k >= len(urls):
-                    break
-                if e.cget('state') != 'disabled' and not e.get().strip():
-                    e.insert(0, urls[k]); k += 1
-            status.config(text=f'주소 {k}개를 위에서부터 채웠습니다. 순서가 맞는지 확인 후 저장하세요.'
-                               + (f' (남은 주소 {len(urls) - k}개)' if len(urls) > k else ''), fg=C['green'])
+            status.config(text=f'표시 {n}개 / 전체 {len(st["pages"])}개 (숨길 제목: {hide_var.get() or "없음"})',
+                          fg=C['subtext'])
 
         q_var.trace_add('write', lambda *a: show())
 
@@ -1870,8 +1856,8 @@ class OneNoteExporterGUI:
                     items.append((pg, url))
             if not items:
                 status.config(text='새로 넣은 링크가 없습니다.', fg=C['subtext']); return
-            words = [x.strip() for x in ex_var.get().split(',') if x.strip()]
-            CONFIG.update({'lawtalk_id': id_var.get().strip(), 'title_exclude': ex_var.get().strip(),
+            words = []
+            CONFIG.update({'lawtalk_id': id_var.get().strip(), 'link_hide_prefix': hide_var.get().strip(),
                            'title_strip_result': bool(strip_var.get()), 'link_strip_dash': bool(dash_var.get()),
                            'upload_xlsx': '' if xl_var.get() == app_config.UPLOAD_XLSX else xl_var.get()})
             app_config.save_config()

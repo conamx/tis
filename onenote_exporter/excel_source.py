@@ -156,45 +156,44 @@ def clean_title(title, exclude=(), strip_result=False):
 
 
 def record_upload(path, rows):
-    """rows: [{'아이디','사건번호','제목','url'}, ...] → 기록 엑셀 맨 아래에 추가 (같은 url은 건너뜀).
-    형식: 날짜(11/26 목) | 아이디 | 사건번호 | 제목 | url. 반환: 추가한 행 수"""
+    """rows: [{'아이디','사건번호','제목','url'}, ...] → 기록 엑셀 맨 아래에 '이어서' 추가 (같은 url은 건너뜀).
+    형식: 날짜(11/26 목) | 아이디 | 사건번호 | 제목 | url. 기존 엑셀의 서식·링크는 그대로 두고 행만 붙임.
+    반환: 추가한 행 수"""
     import openpyxl
     from openpyxl.styles import Font
-    if os.path.exists(path):
-        try:
-            wb = openpyxl.load_workbook(path)
-        except PermissionError:
-            raise
-        except Exception as e:
-            raise ValueError(f'이 엑셀은 매크로가 고칠 수 없는 형식입니다 ({e.__class__.__name__}). '
-                             '다른 엑셀을 고르거나 새 파일로 기록하세요.')
-        ws = wb.active
-        head = [str(c.value or '').strip().lower() for c in ws[1]]
-        url_col = next((i for i, h in enumerate(head) if 'url' in h or '링크' in h), 4)
-    else:
+    import xlsx_append
+    if not os.path.exists(path):
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = '로톡 url'
+        ws.title = 'Sheet1'
         ws.append(UPLOAD_HEADER)
         for c in ws[1]:
             c.font = Font(bold=True)
         for col, w in zip('ABCDE', (11.25, 11.25, 15.1, 65, 42)):
             ws.column_dimensions[col].width = w
-        url_col = 4
-    have = {str(r[url_col]).strip() for r in ws.iter_rows(min_row=2, values_only=True)
-            if r and len(r) > url_col and r[url_col]}
+        ws.auto_filter.ref = 'A1:E1'
+        wb.save(path)
+    # 이미 있는 url (읽기 전용으로 열면 한셀 파일도 읽힘)
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        ws = wb.worksheets[0]
+        it = ws.iter_rows(values_only=True)
+        head = [str(v or '').strip().lower() for v in next(it, [])]
+        url_col = next((i for i, h in enumerate(head) if 'url' in h or '링크' in h), 4)
+        have = {str(r[url_col]).strip() for r in it if r and len(r) > url_col and r[url_col]}
+        wb.close()
+    except PermissionError:
+        raise
+    except Exception as e:
+        raise ValueError(f'엑셀을 읽지 못했습니다: {e}')
     now = datetime.now()
     day = f'{now.month}/{now.day} {_WEEK[now.weekday()]}'
-    added = 0
+    new = []
     for r in rows:
         url = (r.get('url') or '').strip()
-        if not url or url in have:
-            continue
-        ws.append([day, r.get('아이디', ''), r.get('사건번호', ''), r.get('제목', ''), url])
-        cell = ws.cell(row=ws.max_row, column=5)
-        cell.hyperlink = url
-        cell.font = Font(color='0563C1', underline='single')
-        have.add(url)
-        added += 1
-    wb.save(path)   # 엑셀에서 열려 있으면 PermissionError
-    return added
+        if url and url not in have:
+            new.append([day, r.get('아이디', ''), r.get('사건번호', ''), r.get('제목', ''), url])
+            have.add(url)
+    if new:
+        xlsx_append.append_rows(path, new, link_col=url_col + 1)
+    return len(new)
