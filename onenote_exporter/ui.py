@@ -1863,7 +1863,8 @@ class OneNoteExporterGUI:
             app_config.save_config()
             try:
                 n = excel_source.record_upload(xl_var.get(), [
-                    {'아이디': id_var.get().strip(), '사건번호': pg['case_no'], 'url': u,
+                    {'날짜': excel_source.title_date(pg['title']),   # 제목에 적힌 날짜 (없으면 오늘)
+                     '아이디': id_var.get().strip(), '사건번호': pg['case_no'], 'url': u,
                      '제목': excel_source.clean_title(pg['title'], words, strip_var.get())}
                     for pg, u in items])
             except PermissionError:

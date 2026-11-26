@@ -132,6 +132,27 @@ UPLOAD_HEADER = ['날짜', '아이디', '사건번호', '제목', 'url']
 _WEEK = '월화수목금토일'
 
 
+def title_date(title, today=None):
+    """제목 앞부분('[' 앞)에 적힌 날짜 → '11/25 수'. 요일이 없으면 계산해서 붙임. 날짜가 없으면 ''"""
+    head = (title or '').split('[', 1)[0]
+    m = re.search(r'(?<!\d)(\d{1,2})\s*/\s*(\d{1,2})(?!\d)(?:\s*\(?\s*([월화수목금토일])\s*\)?)?', head)
+    if not m:
+        return ''
+    mon, day, wd = int(m.group(1)), int(m.group(2)), m.group(3)
+    if not (1 <= mon <= 12 and 1 <= day <= 31):
+        return ''
+    if not wd:
+        today = today or datetime.now()
+        try:
+            d = datetime(today.year, mon, day)
+            if (d - today).days > 31:          # 미래 날짜면 작년 글
+                d = datetime(today.year - 1, mon, day)
+            wd = _WEEK[d.weekday()]
+        except ValueError:
+            return f'{mon}/{day}'
+    return f'{mon}/{day} {wd}'
+
+
 def clean_title(title, exclude=(), strip_result=False):
     """기록용 제목: 첫 '[' 부터 시작, 뺄 단어 제거, (선택) 끝의 결과 괄호 제거"""
     t = title or ''
@@ -156,7 +177,7 @@ def clean_title(title, exclude=(), strip_result=False):
 
 
 def record_upload(path, rows):
-    """rows: [{'아이디','사건번호','제목','url'}, ...] → 기록 엑셀 맨 아래에 '이어서' 추가 (같은 url은 건너뜀).
+    """rows: [{'날짜'(없으면 오늘),'아이디','사건번호','제목','url'}, ...] → 기록 엑셀 맨 아래에 '이어서' 추가 (같은 url은 건너뜀).
     형식: 날짜(11/26 목) | 아이디 | 사건번호 | 제목 | url. 기존 엑셀의 서식·링크는 그대로 두고 행만 붙임.
     반환: 추가한 행 수"""
     import openpyxl
@@ -192,7 +213,7 @@ def record_upload(path, rows):
     for r in rows:
         url = (r.get('url') or '').strip()
         if url and url not in have:
-            new.append([day, r.get('아이디', ''), r.get('사건번호', ''), r.get('제목', ''), url])
+            new.append([r.get('날짜') or day, r.get('아이디', ''), r.get('사건번호', ''), r.get('제목', ''), url])
             have.add(url)
     if new:
         xlsx_append.append_rows(path, new, link_col=url_col + 1)
