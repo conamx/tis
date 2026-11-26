@@ -15,7 +15,11 @@ SIZE_BODY    = 11                              # 본문
 SIZE_HEADING = {1: 21, 2: 18, 3: 14, 4: 12, 5: 11, 6: 11}   # # ~ ###### 소제목
 SIZE_KEYWORD = 12                              # 상단 키워드 (굵게)
 SIZE_FOOTER  = 20                              # 하단 문구 (기존과 동일)
-TABLE_ALIGN  = 'center'                        # 표(텍스트 줄) 정렬: 'center' / 'left' / 'right'
+TABLE_ALIGN  = 'center'
+# 로톡 대제목/소제목: OneNote '제목' 스타일(h2/h3)로 넣어서 복사할 때 제목으로 넘어가게 함
+#   # ## → 대제목(h2), ### 이하 → 소제목(h3). 하단 문구는 제목이 아님(굵은 글씨만)
+HEADING_STYLE = {1: 'h2', 2: 'h2', 3: 'h3', 4: 'h3', 5: 'h3', 6: 'h3'}
+HEADING_FONT_PT = {'h2': 18, 'h3': 14}                        # 표(텍스트 줄) 정렬: 'center' / 'left' / 'right'
 
 TITLE_CHARS_PER_LINE = 28    # 제목이 한 줄에 들어가는 글자 수(대략). 겹치면 줄이고, 간격이 크면 늘리세요.
 TITLE_LINE_HEIGHT    = 30    # 제목 한 줄 높이(pt)
@@ -75,14 +79,16 @@ def _run_html(text, size, bold, ital, blue):
     return f"<span style='{';'.join(st)}'>{_esc(text)}</span>"
 
 
-def _oe_para(text, size=SIZE_BODY, bold=False, align=None):
-    """문단 1개 → <one:OE>. 모든 글자에 크기/볼드를 명시해서 복붙해도 서식이 유지되게 한다."""
+def _oe_para(text, size=SIZE_BODY, bold=False, align=None, qs=None):
+    """문단 1개 → <one:OE>. 모든 글자에 크기/볼드를 명시해서 복붙해도 서식이 유지되게 한다.
+    qs='h2'/'h3' 이면 OneNote 제목 스타일 자리표시를 단다 (페이지 만들 때 실제 번호로 바뀜)."""
     html = ''.join(_run_html(t, size, b, i, c)
                    for t, b, i, c in _inline_runs(text, force_bold=bold))
     st = [f'font-size:{size:.1f}pt']
     if bold: st.append('font-weight:bold')
     al = f' alignment="{align}"' if align else ''
-    return f"<one:OE{al} style='{';'.join(st)}'><one:T>{_cdata(html)}</one:T></one:OE>"
+    q = f' quickStyleIndex="__QS_{qs}__"' if qs else ''
+    return f"<one:OE{q}{al} style='{';'.join(st)}'><one:T>{_cdata(html)}</one:T></one:OE>"
 
 
 def _oe_blank(size=SIZE_BODY):
@@ -112,7 +118,10 @@ def build_md_body_xml(article, top_keyword='', footer_presets=None):
         if t == 'blank':
             parts.append(_oe_blank())
         elif t == 'heading':
-            parts.append(_oe_para(b['text'], SIZE_HEADING.get(b.get('level', 2), SIZE_BODY), bold=True))
+            lv = b.get('level', 2)
+            qs = HEADING_STYLE.get(lv)
+            parts.append(_oe_para(b['text'], HEADING_FONT_PT.get(qs, SIZE_HEADING.get(lv, SIZE_BODY)),
+                                  bold=True, qs=qs))
         elif t == 'bullet':
             parts.append(_oe_para('• ' + b['text']))
         elif t == 'table':
@@ -126,6 +135,33 @@ def build_md_body_xml(article, top_keyword='', footer_presets=None):
             for text, is_bold in preset_lines:
                 parts.append(_oe_para(text, SIZE_FOOTER, bold=is_bold))
     return ''.join(parts)
+
+
+# 페이지에 OneNote 제목 스타일(h2=대제목, h3=소제목)을 등록하고 본문의 자리표시를 실제 번호로 바꾸는 PowerShell
+#  - 이미 같은 이름(h2/h3) 스타일이 있으면 그 번호를 쓰되 크기·굵기·색을 우리 값으로 맞춤 (OneNote 기본 제목색 파랑 방지)
+#  - 새로 만들 때는 기존 QuickStyleDef 뒤(없으면 TagDef 뒤, 그것도 없으면 맨 앞)에 끼움 (OneNote XML 순서 규칙)
+QUICKSTYLE_PS = (
+    "$qsDefs=@(@('h2','" + str(HEADING_FONT_PT['h2']) + ".0'),@('h3','" + str(HEADING_FONT_PT['h3']) + ".0'))\n"
+    "$qsAll=@($doc.DocumentElement.SelectNodes('one:QuickStyleDef',$mgr))\n"
+    "$qsMax=-1; $qsFont='Malgun Gothic'\n"
+    "foreach($q in $qsAll){ $i=[int]$q.GetAttribute('index'); if($i -gt $qsMax){$qsMax=$i}; "
+    "if($q.GetAttribute('name') -eq 'p' -and $q.GetAttribute('font')){$qsFont=$q.GetAttribute('font')} }\n"
+    "foreach($d in $qsDefs){\n"
+    "  $hit=$null; foreach($q in $qsAll){ if($q.GetAttribute('name') -eq $d[0]){$hit=$q} }\n"
+    "  if(-not $hit){\n"
+    "    $qsMax++; $hit=$doc.CreateElement('one:QuickStyleDef',$ns); $hit.SetAttribute('index',[string]$qsMax)\n"
+    "    $hit.SetAttribute('name',$d[0])\n"
+    "    $last=$doc.DocumentElement.SelectSingleNode('one:QuickStyleDef[last()]',$mgr)\n"
+    "    if(-not $last){ $last=$doc.DocumentElement.SelectSingleNode('one:TagDef[last()]',$mgr) }\n"
+    "    if($last){ $doc.DocumentElement.InsertAfter($hit,$last)|Out-Null } else { $doc.DocumentElement.PrependChild($hit)|Out-Null }\n"
+    "    $qsAll=@($doc.DocumentElement.SelectNodes('one:QuickStyleDef',$mgr))\n"
+    "  }\n"
+    "  $hit.SetAttribute('fontColor','automatic'); $hit.SetAttribute('highlightColor','automatic')\n"
+    "  $hit.SetAttribute('font',$qsFont); $hit.SetAttribute('fontSize',$d[1]); $hit.SetAttribute('bold','true')\n"
+    "  $hit.SetAttribute('spaceBefore','0.0'); $hit.SetAttribute('spaceAfter','0.0')\n"
+    "  $bodyXml=$bodyXml.Replace('__QS_'+$d[0]+'__',$hit.GetAttribute('index'))\n"
+    "}\n"
+)
 
 
 class SectionInfo:
@@ -452,6 +488,7 @@ class OneNoteManager:
                 "  $oec=$doc.CreateElement('one:OEChildren',$ns)\n"
                 "  $outline.AppendChild($oec)|Out-Null\n"
                 "}\n"
+                + QUICKSTYLE_PS +
                 # 본문 XML을 별도 문서로 읽은 뒤 페이지 문서로 옮겨 붙임 (네임스페이스 안전)
                 "$frag=New-Object System.Xml.XmlDocument\n"
                 "$frag.LoadXml('<root xmlns:one=\"'+$ns+'\">'+$bodyXml+'</root>')\n"

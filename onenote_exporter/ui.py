@@ -324,7 +324,9 @@ class OneNoteExporterGUI:
         for t, cmd in [('✓ 전체', self._sel_all),
                         ('✗ 해제',  self._desel),
                         ('🗑 삭제',  self._delete),
-                        ('↻ 다시 쓰기', self._rewrite_selected)]:
+                        ('↻ 다시 쓰기', self._rewrite_selected),
+                        ('📋 로톡용 복사', self._copy_lawtalk),
+                        ('제목 복사', self._copy_title)]:
             tk.Button(lst_bot, text=t, command=cmd,
                       font=(F, 9), bg=C['light'], fg=C['text'],
                       relief=tk.FLAT, padx=12, pady=5, cursor='hand2'
@@ -1602,6 +1604,40 @@ class OneNoteExporterGUI:
             self.root.bell()
         except Exception:
             pass
+
+    # ── 로톡용 복사 (대제목·소제목 그대로) ──
+
+    def _first_checked(self):
+        sel = [i for i, v in enumerate(self.check_vars) if v.get()]
+        if not sel:
+            messagebox.showwarning('로톡용 복사', '복사할 글을 하나 체크하세요.'); return None
+        if len(sel) > 1:
+            self._set_status(f'여러 개가 체크돼 있어 맨 위 글을 복사합니다 ({len(sel)}개 중 1번째)', C['orange'])
+        return self.articles[sel[0]]
+
+    def _copy_lawtalk(self):
+        import lawtalk
+        art = self._first_checked()
+        if not art:
+            return
+        kw = fill_template(self.keyword_var.get().strip(), art.get('meta'))
+        footers = [lines for var, (_, lines) in zip(self.footer_preset_vars, FOOTER_PRESETS) if var.get()]
+        frag, text = lawtalk.article_html(art, keyword=kw, footers=footers)
+        if lawtalk.copy_to_clipboard(frag, text):
+            n2, n3 = frag.count('<h2>'), frag.count('<h3>')
+            self._set_status(f'로톡용 복사 완료 (대제목 {n2}개 · 소제목 {n3}개) → 로톡 본문에 Ctrl+V', C['green'])
+        else:
+            self.root.clipboard_clear(); self.root.clipboard_append(text)
+            self._set_status('서식 복사가 안 돼서 글자만 복사했습니다 (윈도우에서만 서식 복사 가능)', C['orange'])
+
+    def _copy_title(self):
+        art = self._first_checked()
+        if not art:
+            return
+        title = fill_template(self.prefix_var.get().strip(), art.get('meta'))
+        title = (title + ' ' if title else '') + art.get('title', '')
+        self.root.clipboard_clear(); self.root.clipboard_append(title)
+        self._set_status(f'제목 복사: {title[:40]}', C['green'])
 
     # ── 1편 다시 쓰기 (메인 화면 글 목록) ──
 
