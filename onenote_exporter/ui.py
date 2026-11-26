@@ -103,6 +103,15 @@ F = '맑은 고딕'
 _CASE_NO_RE = re.compile(r'\d{2,4}\s*[가-힣]{1,4}\s*\d{1,7}(?:호)?')
 
 
+PREFIX_MAX, KEYWORD_MAX = 60, 80
+
+
+def clean_field(v, limit):
+    """접두어·키워드: 여러 줄이거나 너무 길면 잘못 들어간 값(원고 붙여넣기 등)으로 보고 비움"""
+    v = (v or '').strip()
+    return '' if ('\n' in v or '\r' in v or len(v) > limit) else v
+
+
 def case_meta(case=None, text=''):
     """엑셀 사례(또는 직접 입력한 사건자료)에서 자리표시 값을 만든다."""
     if case is not None:
@@ -198,6 +207,8 @@ class OneNoteExporterGUI:
         self.generating   = False
 
         self._build()
+        self._guard_field(self.prefix_var, '접두어', PREFIX_MAX)
+        self._guard_field(self.keyword_var, '키워드', KEYWORD_MAX)
         self._shortcuts()
         self.root.after(600, self._auto_connect)
 
@@ -337,9 +348,6 @@ class OneNoteExporterGUI:
         for t, cmd in [('✓ 전체', self._sel_all),
                         ('✗ 해제',  self._desel),
                         ('🗑 삭제',  self._delete),
-                        ('↻ 다시 쓰기', self._rewrite_selected),
-                        ('📋 로톡용 복사', self._copy_lawtalk),
-                        ('제목 복사', self._copy_title),
                         ('🔗 링크 기록', self._link_dialog)]:
             tk.Button(lst_bot, text=t, command=cmd,
                       font=(F, 9), bg=C['light'], fg=C['text'],
@@ -440,6 +448,20 @@ class OneNoteExporterGUI:
     def _on_canvas_configure(self, e):
         self.check_canvas.itemconfig(self.check_canvas_window, width=e.width)
 
+
+    def _guard_field(self, var, name, limit):
+        """한 줄짜리 칸에 원고 같은 긴 글이 붙여넣어지면 첫 줄만 남기고 길이를 자름"""
+        good = {'v': clean_field(var.get(), limit)}
+
+        def check(*_):
+            v = var.get()
+            if '\n' in v or '\r' in v or len(v) > limit:
+                var.set(good['v'])        # 붙여넣기 전 값으로 되돌림
+                self._set_status(f'{name} 칸에 원고 같은 긴 글이 들어와서 취소했습니다 — 원고는 아래 큰 칸에 붙여넣으세요',
+                                 C['orange'])
+            else:
+                good['v'] = v
+        var.trace_add('write', check)
 
     def _shortcuts(self):
         self.root.bind('<F5>',        lambda e: self._parse())
@@ -593,10 +615,11 @@ class OneNoteExporterGUI:
         prefix   = self.prefix_var.get().strip()
         keyword  = self.keyword_var.get().strip()
         msg = f"💾 {len(selected)}개 글을 내보낼까요?\n섹션: {self.section_var.get()}"
+        short = lambda t: t if len(t) <= 40 else t[:40] + '…'
         if prefix:
-            msg += f"\n접두어: {prefix}"
+            msg += f"\n접두어: {short(prefix)}"
         if keyword:
-            msg += f"\n키워드(상단삽입): {keyword}"
+            msg += f"\n키워드(상단삽입): {short(keyword)}"
         if not messagebox.askyesno('확인', msg):
             return
         self._log(f"내보내기 시작: {len(selected)}개", 'inf')
@@ -1141,7 +1164,8 @@ class OneNoteExporterGUI:
             n = 10
         return {
             '편수': n,
-            '접두어': self.prefix_var.get(), '상단키워드': self.keyword_var.get(),
+            '접두어': clean_field(self.prefix_var.get(), PREFIX_MAX),
+            '상단키워드': clean_field(self.keyword_var.get(), KEYWORD_MAX),
             '하단프리셋': [name for var, (name, _) in zip(self.footer_preset_vars, FOOTER_PRESETS)
                        if var.get()],
             '하단구분선': bool(self.footer_var.get()),
@@ -1185,8 +1209,8 @@ class OneNoteExporterGUI:
             return
         self.project_info.config(text=f"{s.get('편수')}편 · 지침 파일 {len(p.guide_files())}개")
         # 프로젝트 기본값을 메인 화면 접두어/키워드/하단 프리셋에 반영
-        self.prefix_var.set(s.get('접두어', '') or '')
-        self.keyword_var.set(s.get('상단키워드', '') or '')
+        self.prefix_var.set(clean_field(s.get('접두어', '') or '', PREFIX_MAX))
+        self.keyword_var.set(clean_field(s.get('상단키워드', '') or '', KEYWORD_MAX))
         wanted = set(s.get('하단프리셋') or [])
         for var, (name, _) in zip(self.footer_preset_vars, FOOTER_PRESETS):
             var.set(name in wanted)
