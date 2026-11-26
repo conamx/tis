@@ -21,6 +21,7 @@ CONFIG_PATH   = os.path.join(APP_DIR, 'config.json')
 PROJECTS_DIR  = os.path.join(APP_DIR, 'projects')
 OUTPUT_DIR    = os.path.join(APP_DIR, 'output')
 USAGE_LOG     = os.path.join(APP_DIR, '사용기록.csv')
+UPLOAD_XLSX   = os.path.join(APP_DIR, '업로드기록.xlsx')   # 로톡 링크 기록 (사건번호 | 링크 | 제목)
 LOG_DIR       = os.path.join(APP_DIR, 'logs')     # 날짜별 작업 기록 (밤새 돌린 결과 확인용)
 # 두 번째 Claude 계정의 로그인 정보가 저장되는 폴더 (첫 번째 계정은 Claude Code 기본 위치)
 ACCOUNT2_DIR  = os.path.join(APP_DIR, 'claude_account2')
@@ -79,3 +80,15 @@ def open_folder(path):
     else:
         import subprocess
         subprocess.Popen(['xdg-open', path])
+
+
+def open_file(path):
+    """파일을 기본 프로그램(엑셀 등)으로 연다. 없으면 False"""
+    if not os.path.exists(path):
+        return False
+    if sys.platform.startswith('win'):
+        os.startfile(path)  # noqa
+    else:
+        import subprocess
+        subprocess.Popen(['xdg-open', path])
+    return True

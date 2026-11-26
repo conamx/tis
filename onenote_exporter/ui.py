@@ -338,7 +338,8 @@ class OneNoteExporterGUI:
                         ('🗑 삭제',  self._delete),
                         ('↻ 다시 쓰기', self._rewrite_selected),
                         ('📋 로톡용 복사', self._copy_lawtalk),
-                        ('제목 복사', self._copy_title)]:
+                        ('제목 복사', self._copy_title),
+                        ('🔗 링크 기록', self._link_dialog)]:
             tk.Button(lst_bot, text=t, command=cmd,
                       font=(F, 9), bg=C['light'], fg=C['text'],
                       relief=tk.FLAT, padx=12, pady=5, cursor='hand2'
@@ -404,7 +405,7 @@ class OneNoteExporterGUI:
         for a in self.articles:
             var = tk.BooleanVar(value=True)
             self.check_vars.append(var)
-            t = a['title'][:60] + ('…' if len(a['title']) > 60 else '')
+            t = ('🔗 ' if a.get('lawtalk_url') else '') + a['title'][:60] + ('…' if len(a['title']) > 60 else '')
             tk.Checkbutton(
                 self.check_frame, text=t,
                 variable=var,
@@ -1690,6 +1691,99 @@ class OneNoteExporterGUI:
         title = (title + ' ' if title else '') + art.get('title', '')
         self.root.clipboard_clear(); self.root.clipboard_append(title)
         self._set_status(f'제목 복사: {title[:40]}', C['green'])
+
+    # ── 로톡 링크 기록 (엑셀 + OneNote 페이지) ──
+
+    def _full_title(self, art):
+        pre = fill_template(self.prefix_var.get().strip(), art.get('meta'))
+        return (pre + ' ' if pre else '') + art.get('title', '')
+
+    def _link_dialog(self):
+        sel = [i for i, v in enumerate(self.check_vars) if v.get()]
+        idxs = sel or list(range(len(self.articles)))
+        if not idxs:
+            messagebox.showwarning('링크 기록', '글 목록이 비어 있습니다.'); return
+        w = tk.Toplevel(self.root)
+        w.title('로톡 링크 기록')
+        w.geometry('900x560')
+        w.configure(bg=C['bg'])
+        w.transient(self.root)
+        card = self._card(w, '로톡에 올린 글 주소를 붙여넣으세요 — 엑셀(업로드기록.xlsx)과 OneNote 페이지에 함께 기록')
+        card.pack_configure(fill=tk.BOTH, expand=True)
+        hdr = tk.Frame(card, bg=C['white']); hdr.pack(fill=tk.X, padx=12, pady=(6, 2))
+        for t, wd in (('사건번호', 14), ('제목', 46), ('로톡 링크', 30)):
+            tk.Label(hdr, text=t, font=(F, 9, 'bold'), bg=C['white'], fg=C['subtext'], width=wd,
+                     anchor='w').pack(side=tk.LEFT)
+        wrap = tk.Frame(card, bg=C['white']); wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+        sb = tk.Scrollbar(wrap); sb.pack(side=tk.RIGHT, fill=tk.Y)
+        cv = tk.Canvas(wrap, bg=C['white'], highlightthickness=0, yscrollcommand=sb.set)
+        cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True); sb.config(command=cv.yview)
+        inner = tk.Frame(cv, bg=C['white'])
+        cv.create_window((0, 0), window=inner, anchor='nw')
+        inner.bind('<Configure>', lambda e: cv.config(scrollregion=cv.bbox('all')))
+        rows = []
+        for i in idxs:
+            a = self.articles[i]
+            r = tk.Frame(inner, bg=C['white']); r.pack(fill=tk.X, pady=2)
+            case_no = (a.get('meta') or {}).get('사건번호', '')
+            tk.Label(r, text=case_no or '-', font=(F, 9), bg=C['white'], width=14, anchor='w').pack(side=tk.LEFT)
+            title = self._full_title(a)
+            tk.Label(r, text=title[:44] + ('…' if len(title) > 44 else ''), font=(F, 9), bg=C['white'],
+                     width=46, anchor='w').pack(side=tk.LEFT)
+            e = tk.Entry(r, font=(F, 9), width=30, relief=tk.FLAT, bg=C['bg'])
+            e.insert(0, a.get('lawtalk_url', ''))
+            e.pack(side=tk.LEFT, ipady=3)
+            def paste(e=e):
+                try:
+                    e.delete(0, tk.END); e.insert(0, w.clipboard_get().strip())
+                except Exception:
+                    pass
+            tk.Button(r, text='붙여넣기', command=paste, font=(F, 8), bg=C['light'], relief=tk.FLAT,
+                      padx=6, cursor='hand2').pack(side=tk.LEFT, padx=4)
+            rows.append((i, a, case_no, title, e))
+        status = tk.Label(w, text='', font=(F, 9), bg=C['bg'], fg=C['subtext'])
+
+        def save():
+            items = []
+            for i, a, case_no, title, e in rows:
+                url = e.get().strip()
+                if url and url != a.get('lawtalk_url', ''):
+                    if not re.match(r'^https?://', url):
+                        messagebox.showwarning('링크 기록', f'주소 형식이 아닙니다:\n{url}', parent=w); return
+                    items.append((a, case_no, title, url))
+            if not items:
+                status.config(text='새로 넣은 링크가 없습니다.'); return
+            try:
+                n = excel_source.record_upload(app_config.UPLOAD_XLSX, [
+                    {'지침': (a.get('gen') or {}).get('project', ''), '사건번호': c, '링크': u, '제목': t}
+                    for a, c, t, u in items])
+            except PermissionError:
+                messagebox.showerror('링크 기록', '업로드기록.xlsx 가 엑셀에서 열려 있어 저장하지 못했습니다.\n닫고 다시 저장하세요.', parent=w)
+                return
+            except Exception as ex:
+                messagebox.showerror('링크 기록', f'엑셀 저장 실패: {ex}', parent=w); return
+            for a, c, t, u in items:
+                a['lawtalk_url'] = u
+            self._log(f'링크 기록: 엑셀 {n}건 추가', 'ok')
+            status.config(text=f'엑셀에 {n}건 기록했습니다. OneNote 페이지에 넣는 중…', fg=C['green'])
+            targets = [(a, u) for a, c, t, u in items if a.get('page_id')]
+            def work():
+                ok = sum(1 for a, u in targets if self.is_connected and self.onenote.add_link(a['page_id'], u))
+                miss = len(items) - len(targets)
+                msg = f'엑셀 {n}건 · OneNote {ok}건 기록 완료'
+                if miss:
+                    msg += f' (OneNote 페이지 정보가 없는 {miss}건은 엑셀에만 기록)'
+                self._ui(lambda: (status.winfo_exists() and status.config(text=msg, fg=C['green']),
+                                  self._rebuild_checks(), self._log(msg, 'ok')))
+            threading.Thread(target=work, daemon=True).start()
+
+        bf = tk.Frame(w, bg=C['bg']); bf.pack(fill=tk.X, padx=12, pady=10, side=tk.BOTTOM)
+        _btn(bf, '저장', save, bg=C['accent'], fs=10, px=24, py=6).pack(side=tk.RIGHT)
+        tk.Button(bf, text='기록 엑셀 열기',
+                  command=lambda: app_config.open_file(app_config.UPLOAD_XLSX) or
+                  status.config(text='아직 기록이 없습니다.', fg=C['subtext']),
+                  font=(F, 9), bg=C['light'], relief=tk.FLAT, padx=12, pady=5, cursor='hand2').pack(side=tk.RIGHT, padx=6)
+        status.pack(side=tk.BOTTOM, anchor='w', padx=14)
 
     # ── 1편 다시 쓰기 (메인 화면 글 목록) ──
 

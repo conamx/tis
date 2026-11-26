@@ -123,3 +123,42 @@ def record_usage(project_name, case):
         w.writerow({'날짜': datetime.now().strftime('%Y-%m-%d %H:%M'),
                     '프로젝트': project_name, '시트': case.sheet,
                     '사례키': case.key, '범죄명': case.crime.replace('\n', ' ')})
+
+
+# ── 로톡 업로드 기록 (새 엑셀, 사례 엑셀 원본은 건드리지 않음) ─────────────
+
+UPLOAD_HEADER = ['날짜', '지침', '사건번호', '링크', '제목']
+
+
+def record_upload(path, rows):
+    """rows: [{'지침','사건번호','링크','제목'}, ...] → 업로드기록.xlsx 맨 아래에 추가.
+    같은 링크가 이미 있으면 건너뜀. 반환: 추가한 행 수"""
+    import openpyxl
+    from openpyxl.styles import Font
+    if os.path.exists(path):
+        wb = openpyxl.load_workbook(path)
+        ws = wb.active
+    else:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = '로톡 업로드'
+        ws.append(UPLOAD_HEADER)
+        for c in ws[1]:
+            c.font = Font(bold=True)
+        for col, w in zip('ABCDE', (17, 18, 18, 50, 60)):
+            ws.column_dimensions[col].width = w
+    have = {str(r[3]).strip() for r in ws.iter_rows(min_row=2, values_only=True) if r and r[3]}
+    added = 0
+    for r in rows:
+        url = (r.get('링크') or '').strip()
+        if not url or url in have:
+            continue
+        ws.append([datetime.now().strftime('%Y-%m-%d %H:%M'), r.get('지침', ''), r.get('사건번호', ''),
+                   url, r.get('제목', '')])
+        cell = ws.cell(row=ws.max_row, column=4)
+        cell.hyperlink = url
+        cell.font = Font(color='0563C1', underline='single')
+        have.add(url)
+        added += 1
+    wb.save(path)   # 엑셀에서 열려 있으면 PermissionError
+    return added

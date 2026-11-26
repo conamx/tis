@@ -506,6 +506,45 @@ class OneNoteManager:
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def add_link(self, page_id, url, label='로톡 링크'):
+        """페이지 본문 맨 위에 '로톡 링크: 주소' 한 줄을 넣는다 (누르면 열리는 링크)"""
+        if not page_id or not url:
+            return False
+        tmp = tempfile.mkdtemp(prefix='on_link_')
+        try:
+            pgf = os.path.join(tmp, 'pg.txt'); lf = os.path.join(tmp, 'l.txt'); ps1 = os.path.join(tmp, 'k.ps1')
+            Path(pgf).write_text(page_id, encoding='utf-8')
+            u = _esc(url).replace('"', '&quot;')
+            Path(lf).write_text(f"<span style='font-size:{SIZE_BODY:.1f}pt;font-weight:bold'>{_esc(label)}: </span>"
+                                f"<a href=\"{u}\"><span style='font-size:{SIZE_BODY:.1f}pt'>{_esc(url)}</span></a>",
+                                encoding='utf-8')
+            Path(ps1).write_text(
+                "$ErrorActionPreference='Stop'\n"
+                "$pageId=[System.IO.File]::ReadAllText("+self._q(pgf)+",[System.Text.Encoding]::UTF8).Trim()\n"
+                "$line=[System.IO.File]::ReadAllText("+self._q(lf)+",[System.Text.Encoding]::UTF8)\n"
+                "$on=New-Object -ComObject OneNote.Application\n"
+                "[string]$xml=''\n"
+                "$on.GetPageContent($pageId,[ref]$xml,0)\n"
+                "$doc=[xml]$xml\n"
+                "$ns=$doc.DocumentElement.NamespaceURI\n"
+                "$mgr=New-Object System.Xml.XmlNamespaceManager($doc.NameTable)\n"
+                "$mgr.AddNamespace('one',$ns)\n"
+                "$oec=$doc.SelectSingleNode('//one:Outline/one:OEChildren',$mgr)\n"
+                "if(-not $oec){ throw 'no outline' }\n"
+                "$oe=$doc.CreateElement('one:OE',$ns)\n"
+                "$t=$doc.CreateElement('one:T',$ns)\n"
+                "$t.AppendChild($doc.CreateCDataSection($line))|Out-Null\n"
+                "$oe.AppendChild($t)|Out-Null\n"
+                "$oec.PrependChild($oe)|Out-Null\n"
+                "$on.UpdatePageContent($doc.OuterXml,[DateTime]::MinValue)\n", encoding='utf-8-sig')
+            self._run_ps_file(ps1, timeout=_PAGE_TIMEOUT)
+            return True
+        except Exception as e:
+            print(f"[OneNote] 링크 넣기 실패: {e}")
+            return False
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def delete_page(self, page_id):
         """페이지 삭제 (OneNote '삭제된 페이지'로 이동 — 필요하면 복구 가능)"""
         if not page_id:
