@@ -1683,41 +1683,7 @@ class OneNoteExporterGUI:
         except Exception:
             pass
 
-    # ── 로톡용 복사 (대제목·소제목 그대로) ──
-
-    def _first_checked(self):
-        sel = [i for i, v in enumerate(self.check_vars) if v.get()]
-        if not sel:
-            messagebox.showwarning('로톡용 복사', '복사할 글을 하나 체크하세요.'); return None
-        if len(sel) > 1:
-            self._set_status(f'여러 개가 체크돼 있어 맨 위 글을 복사합니다 ({len(sel)}개 중 1번째)', C['orange'])
-        return self.articles[sel[0]]
-
-    def _copy_lawtalk(self):
-        import lawtalk
-        art = self._first_checked()
-        if not art:
-            return
-        kw = fill_template(self.keyword_var.get().strip(), art.get('meta'))
-        footers = [lines for var, (_, lines) in zip(self.footer_preset_vars, FOOTER_PRESETS) if var.get()]
-        frag, text = lawtalk.article_html(art, keyword=kw, footers=footers)
-        if lawtalk.copy_to_clipboard(frag, text):
-            n2, n3 = frag.count('<h2>'), frag.count('<h3>')
-            self._set_status(f'로톡용 복사 완료 (대제목 {n2}개 · 소제목 {n3}개) → 로톡 본문에 Ctrl+V', C['green'])
-        else:
-            self.root.clipboard_clear(); self.root.clipboard_append(text)
-            self._set_status('서식 복사가 안 돼서 글자만 복사했습니다 (윈도우에서만 서식 복사 가능)', C['orange'])
-
-    def _copy_title(self):
-        art = self._first_checked()
-        if not art:
-            return
-        title = fill_template(self.prefix_var.get().strip(), art.get('meta'))
-        title = (title + ' ' if title else '') + art.get('title', '')
-        self.root.clipboard_clear(); self.root.clipboard_append(title)
-        self._set_status(f'제목 복사: {title[:40]}', C['green'])
-
-    # ── 로톡 링크 기록 (엑셀 + OneNote 페이지) ──
+    # ── 링크 기록 (엑셀 + OneNote 페이지) ──
 
     def _full_title(self, art):
         pre = fill_template(self.prefix_var.get().strip(), art.get('meta'))
@@ -1728,11 +1694,11 @@ class OneNoteExporterGUI:
         if not self.is_connected:
             messagebox.showwarning('링크 기록', 'OneNote가 연결되어 있어야 합니다.'); return
         w = tk.Toplevel(self.root)
-        w.title('로톡 링크 기록')
+        w.title('링크 기록')
         w.geometry('960x640')
         w.configure(bg=C['bg'])
         w.transient(self.root)
-        top = self._card(w, '로톡에 올린 글 주소를 붙여넣으세요 — 기록 엑셀과 OneNote 페이지에 함께 기록')
+        top = self._card(w, '링크 기록')
         bar = tk.Frame(top, bg=C['white']); bar.pack(fill=tk.X, padx=12, pady=8)
         tk.Label(bar, text='섹션', font=(F, 9), bg=C['white'], fg=C['subtext']).pack(side=tk.LEFT)
         sec_var = tk.StringVar(value=self.section_var.get() if self.section_var.get() in self._section_map
@@ -1757,8 +1723,6 @@ class OneNoteExporterGUI:
         hide_var = tk.StringVar(value=CONFIG.get('link_hide_prefix', '사용'))
         tk.Entry(cfgr, textvariable=hide_var, font=(F, 9), width=14, relief=tk.FLAT, bg=C['bg']
                  ).pack(side=tk.LEFT, padx=(6, 4), ipady=3)
-        tk.Label(cfgr, text='(이 글자로 시작하면 숨김)', font=(F, 8), bg=C['white'],
-                 fg='#94a3b8').pack(side=tk.LEFT)
         hide_var.trace_add('write', lambda *a: show())
         strip_var = tk.BooleanVar(value=bool(CONFIG.get('title_strip_result', False)))
         tk.Checkbutton(cfgr, text='끝의 결과 괄호 빼기', variable=strip_var, font=(F, 9), bg=C['white'],
@@ -1774,9 +1738,6 @@ class OneNoteExporterGUI:
                  ).pack(side=tk.LEFT, padx=6, ipady=3)
         date_lbl = tk.Label(dr, text='', font=(F, 9), bg=C['white'], fg=C['accent'])
         date_lbl.pack(side=tk.LEFT)
-        tk.Label(dr, text="  제목 정리: 앞의 ㅡ 지우기 + 날짜가 없으면 '사용 날짜 로톡' 붙이기 "
-                          "(예: 사용 11/25 수 로톡 [○○변호사 성공사례] …)", font=(F, 8), bg=C['white'],
-                 fg='#94a3b8').pack(side=tk.LEFT)
         def _date_show(*_):
             d = excel_source.parse_date_label(date_var.get())
             date_lbl.config(text=f'→ {d}' if d else '→ 날짜 형식 확인 (예: 11/25)',
@@ -1795,13 +1756,11 @@ class OneNoteExporterGUI:
         xl_lbl = tk.Label(cfgr, text=os.path.basename(xl_var.get()), font=(F, 9), bg=C['white'], fg=C['text'])
         xl_lbl.pack(side=tk.LEFT, padx=6)
         self._small_btn(cfgr, '바꾸기', pick_xl).pack(side=tk.LEFT)
-        tk.Label(cfgr, text='기존 엑셀을 고르면 맨 아래에 이어서 추가 (날짜 | 아이디 | 사건번호 | 제목 | url)',
-                 font=(F, 8), bg=C['white'], fg='#94a3b8').pack(side=tk.LEFT, padx=10)
 
         lc = tk.Frame(w, bg=C['white'], highlightbackground=C['light'], highlightthickness=1)
         lc.pack(fill=tk.BOTH, expand=True, padx=12, pady=(8, 0))
         hdr = tk.Frame(lc, bg=C['bg']); hdr.pack(fill=tk.X, padx=1, pady=1)
-        for t, wd in (('사건번호', 14), ('OneNote 페이지 제목', 50), ('로톡 링크', 32)):
+        for t, wd in (('사건번호', 14), ('OneNote 페이지 제목', 50), ('링크', 32)):
             tk.Label(hdr, text=t, font=(F, 9, 'bold'), bg=C['bg'], fg=C['subtext'], width=wd,
                      anchor='w').pack(side=tk.LEFT, padx=(8, 0), pady=5)
         wrap = tk.Frame(lc, bg=C['white']); wrap.pack(fill=tk.BOTH, expand=True)
@@ -1860,8 +1819,7 @@ class OneNoteExporterGUI:
                 rows.append((pg, e))
                 n += 1
             cv.yview_moveto(0)
-            status.config(text=f'표시 {n}개 / 전체 {len(st["pages"])}개 (숨길 제목: {hide_var.get() or "없음"})',
-                          fg=C['subtext'])
+            status.config(text=f'{n}개 / 전체 {len(st["pages"])}개', fg=C['subtext'])
 
         q_var.trace_add('write', lambda *a: show())
 

@@ -214,9 +214,12 @@ def parse_page_rows(data):
         head = r.get('head') or ''
         text = re.sub(r'<[^>]+>', ' ', head)
         cm = re.search(r'사건번호\s*[:：]\s*([0-9]{2,4}\s*[가-힣]{1,4}\s*[0-9]{1,7}(?:호)?)', text)
-        lm = re.search(r'href=["\']([^"\']+)["\']', head) if '로톡 링크' in head else None
-        if not lm and '로톡 링크' in text:
-            lm = re.search(r'로톡 링크\s*[:：]\s*(https?://\S+)', text)
+        # 맨 위에 넣은 링크 줄 (주소만 있는 줄, 또는 예전 '로톡 링크: 주소' 줄)
+        first = (head.split('\n') or [''])[0]
+        lm = re.search(r'href=["\'](https?://[^"\']+)["\']', first)
+        if not lm and '로톡 링크' in head:
+            lm = re.search(r'href=["\'](https?://[^"\']+)["\']', head) or \
+                re.search(r'로톡 링크\s*[:：]\s*(https?://\S+)', text)
         rows.append({'id': r.get('id', ''), 'title': (r.get('title') or '').strip(),
                      'time': r.get('time') or '',
                      'case_no': cm.group(1).replace(' ', '') if cm else '',
@@ -588,8 +591,8 @@ class OneNoteManager:
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def add_link(self, page_id, url, label='로톡 링크', strip_dash=False, new_title=None):
-        """페이지 본문 맨 위에 '로톡 링크: 주소' 한 줄을 넣는다 (누르면 열리는 링크).
+    def add_link(self, page_id, url, label='', strip_dash=False, new_title=None):
+        """페이지 본문 맨 위에 주소 한 줄을 넣는다 (누르면 열리는 링크).
         strip_dash=True 면 제목 맨 앞의 'ㅡ'(업로드 전 표시)도 지운다.
         new_title 을 주면 제목을 그 글자로 바꾼다 (날짜 없는 글에 '사용 날짜 로톡' 붙일 때)."""
         if not page_id or not url:
@@ -601,8 +604,8 @@ class OneNoteManager:
             Path(pgf).write_text(page_id, encoding='utf-8')
             Path(tf).write_text(_esc(new_title or ''), encoding='utf-8')
             u = _esc(url).replace('"', '&quot;')
-            Path(lf).write_text(f"<span style='font-size:{SIZE_BODY:.1f}pt;font-weight:bold'>{_esc(label)}: </span>"
-                                f"<a href=\"{u}\"><span style='font-size:{SIZE_BODY:.1f}pt'>{_esc(url)}</span></a>",
+            lab = f"<span style='font-size:{SIZE_BODY:.1f}pt;font-weight:bold'>{_esc(label)}: </span>" if label else ''
+            Path(lf).write_text(lab + f"<a href=\"{u}\"><span style='font-size:{SIZE_BODY:.1f}pt'>{_esc(url)}</span></a>",
                                 encoding='utf-8')
             Path(ps1).write_text(
                 "$ErrorActionPreference='Stop'\n"
