@@ -38,6 +38,11 @@ DEFAULTS = {
     'auto_export': True,        # 원고 생성 후 바로 OneNote로 내보내기
     'account': 1,               # 원고 작성에 쓸 Claude 계정 (1 또는 2)
     'last_project': '',
+    'lawtalk_id': '',           # 링크 기록 엑셀의 '아이디' 칸
+    'title_exclude': '',        # 링크 기록 제목에서 뺄 단어 (쉼표로 구분)
+    'title_strip_result': False,  # 링크 기록 제목에서 끝의 결과 괄호 빼기
+    'upload_xlsx': '',
+    'link_strip_dash': True,     # 링크 넣을 때 OneNote 제목 앞 'ㅡ' 지우기          # 링크 기록 엑셀 (비우면 exe 옆 업로드기록.xlsx)
     'token_1': '',              # 계정 1 장기 토큰 (claude setup-token) — config.json은 남에게 주지 말 것
     'token_2': '',
 }

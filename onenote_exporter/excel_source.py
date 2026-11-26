@@ -7,6 +7,7 @@
 - 원본 엑셀은 읽기만 하고 절대 수정하지 않는다.
 """
 import csv
+import re
 import os
 from datetime import datetime
 
@@ -127,35 +128,70 @@ def record_usage(project_name, case):
 
 # ── 로톡 업로드 기록 (새 엑셀, 사례 엑셀 원본은 건드리지 않음) ─────────────
 
-UPLOAD_HEADER = ['날짜', '섹션', '사건번호', '링크', '제목']
+UPLOAD_HEADER = ['날짜', '아이디', '사건번호', '제목', 'url']
+_WEEK = '월화수목금토일'
+
+
+def clean_title(title, exclude=(), strip_result=False):
+    """기록용 제목: 첫 '[' 부터 시작, 뺄 단어 제거, (선택) 끝의 결과 괄호 제거"""
+    t = title or ''
+    i = t.find('[')
+    if i > 0:
+        t = t[i:]
+    for w in exclude:
+        if w:
+            t = t.replace(w, '')
+    t = t.strip()
+    if strip_result and t.endswith(')'):
+        depth = 0
+        for k in range(len(t) - 1, -1, -1):
+            if t[k] == ')':
+                depth += 1
+            elif t[k] == '(':
+                depth -= 1
+                if depth == 0:
+                    t = t[:k]
+                    break
+    return re.sub(r'\s{2,}', ' ', t).strip()
 
 
 def record_upload(path, rows):
-    """rows: [{'지침','사건번호','링크','제목'}, ...] → 업로드기록.xlsx 맨 아래에 추가.
-    같은 링크가 이미 있으면 건너뜀. 반환: 추가한 행 수"""
+    """rows: [{'아이디','사건번호','제목','url'}, ...] → 기록 엑셀 맨 아래에 추가 (같은 url은 건너뜀).
+    형식: 날짜(11/26 목) | 아이디 | 사건번호 | 제목 | url. 반환: 추가한 행 수"""
     import openpyxl
     from openpyxl.styles import Font
     if os.path.exists(path):
-        wb = openpyxl.load_workbook(path)
+        try:
+            wb = openpyxl.load_workbook(path)
+        except PermissionError:
+            raise
+        except Exception as e:
+            raise ValueError(f'이 엑셀은 매크로가 고칠 수 없는 형식입니다 ({e.__class__.__name__}). '
+                             '다른 엑셀을 고르거나 새 파일로 기록하세요.')
         ws = wb.active
+        head = [str(c.value or '').strip().lower() for c in ws[1]]
+        url_col = next((i for i, h in enumerate(head) if 'url' in h or '링크' in h), 4)
     else:
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = '로톡 업로드'
+        ws.title = '로톡 url'
         ws.append(UPLOAD_HEADER)
         for c in ws[1]:
             c.font = Font(bold=True)
-        for col, w in zip('ABCDE', (17, 18, 18, 50, 60)):
+        for col, w in zip('ABCDE', (11.25, 11.25, 15.1, 65, 42)):
             ws.column_dimensions[col].width = w
-    have = {str(r[3]).strip() for r in ws.iter_rows(min_row=2, values_only=True) if r and r[3]}
+        url_col = 4
+    have = {str(r[url_col]).strip() for r in ws.iter_rows(min_row=2, values_only=True)
+            if r and len(r) > url_col and r[url_col]}
+    now = datetime.now()
+    day = f'{now.month}/{now.day} {_WEEK[now.weekday()]}'
     added = 0
     for r in rows:
-        url = (r.get('링크') or '').strip()
+        url = (r.get('url') or '').strip()
         if not url or url in have:
             continue
-        ws.append([datetime.now().strftime('%Y-%m-%d %H:%M'), r.get('섹션', ''), r.get('사건번호', ''),
-                   url, r.get('제목', '')])
-        cell = ws.cell(row=ws.max_row, column=4)
+        ws.append([day, r.get('아이디', ''), r.get('사건번호', ''), r.get('제목', ''), url])
+        cell = ws.cell(row=ws.max_row, column=5)
         cell.hyperlink = url
         cell.font = Font(color='0563C1', underline='single')
         have.add(url)

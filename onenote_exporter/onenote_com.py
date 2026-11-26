@@ -164,6 +164,23 @@ QUICKSTYLE_PS = (
 )
 
 
+# 제목 맨 앞의 'ㅡ' 표시(업로드 전 표시)를 지움. 제목 안의 서식 태그는 그대로 둠
+TITLE_DASH_RE = r'^((?:<[^>]+>)*)\s*[ㅡ—–\-]+\s*'
+TITLE_DASH_PS = (
+    "$tt=$doc.SelectSingleNode('//one:Title/one:OE/one:T',$mgr)\n"
+    "if($tt){\n"
+    "  $tv=$tt.InnerText\n"
+    "  $nv=[regex]::Replace($tv,'" + TITLE_DASH_RE + "','$1')\n"
+    "  if($nv -ne $tv){ $tt.InnerXml=''; $tt.AppendChild($doc.CreateCDataSection($nv))|Out-Null }\n"
+    "}\n"
+)
+
+
+def strip_title_dash(title):
+    """TITLE_DASH_PS 와 같은 규칙 (화면 표시·테스트용)"""
+    return re.sub(TITLE_DASH_RE, r'\1', title or '')
+
+
 # 섹션의 페이지마다: ID, 제목, 만든 시각, 본문 텍스트 앞부분(사건번호·로톡 링크 찾기용)을 JSON으로 저장
 PAGES_PS = (
     "$ErrorActionPreference='Stop'\n"
@@ -191,7 +208,7 @@ PAGES_PS = (
 
 
 def parse_page_rows(data):
-    """PAGES_PS 결과 → 사건번호·로톡 링크를 뽑아 정리 (최근 페이지 먼저)"""
+    """PAGES_PS 결과 → 사건번호·로톡 링크를 뽑아 정리 (OneNote 순서 그대로)"""
     rows = []
     for r in data or []:
         head = r.get('head') or ''
@@ -204,8 +221,7 @@ def parse_page_rows(data):
                      'time': r.get('time') or '',
                      'case_no': cm.group(1).replace(' ', '') if cm else '',
                      'link': lm.group(1) if lm else ''})
-    rows.sort(key=lambda x: x['time'], reverse=True)
-    return rows
+    return rows   # OneNote 페이지 목록과 같은 순서 (한 번에 붙여넣기가 위에서부터 맞게 들어가도록)
 
 
 class SectionInfo:
@@ -553,7 +569,7 @@ class OneNoteManager:
     def list_pages(self, section_id):
         """섹션의 페이지 목록 + 각 페이지의 사건번호·로톡 링크를 OneNote에서 직접 읽는다.
         매크로를 껐다 켜도, 예전에 만든 페이지여도 언제든 쓸 수 있게 하기 위함.
-        반환: [{'id','title','time','case_no','link'}] (최근 페이지가 먼저)"""
+        반환: [{'id','title','time','case_no','link'}] (OneNote 페이지 목록과 같은 순서)"""
         if not section_id:
             section_id = self.section_id or self.get_first_section_id()
         tmp = tempfile.mkdtemp(prefix='on_pages_')
@@ -572,8 +588,9 @@ class OneNoteManager:
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def add_link(self, page_id, url, label='로톡 링크'):
-        """페이지 본문 맨 위에 '로톡 링크: 주소' 한 줄을 넣는다 (누르면 열리는 링크)"""
+    def add_link(self, page_id, url, label='로톡 링크', strip_dash=False):
+        """페이지 본문 맨 위에 '로톡 링크: 주소' 한 줄을 넣는다 (누르면 열리는 링크).
+        strip_dash=True 면 제목 맨 앞의 'ㅡ'(업로드 전 표시)도 지운다."""
         if not page_id or not url:
             return False
         tmp = tempfile.mkdtemp(prefix='on_link_')
@@ -602,6 +619,7 @@ class OneNoteManager:
                 "$t.AppendChild($doc.CreateCDataSection($line))|Out-Null\n"
                 "$oe.AppendChild($t)|Out-Null\n"
                 "$oec.PrependChild($oe)|Out-Null\n"
+                + (TITLE_DASH_PS if strip_dash else '') +
                 "$on.UpdatePageContent($doc.OuterXml,[DateTime]::MinValue)\n", encoding='utf-8-sig')
             self._run_ps_file(ps1, timeout=_PAGE_TIMEOUT)
             return True
