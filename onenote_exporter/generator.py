@@ -31,6 +31,14 @@ class LimitError(AIError):
 #   {'five_hour': (사용률 0~1, 초기화 시각), 'seven_day': (...), 'status': 'allowed'/'rejected', 'resetsAt': ...}
 USAGE = {}
 
+# 마지막 호출 결과 정보 (작업자 스레드별) — 원고가 덜 왔을 때 원인 기록용
+import threading as _th
+_last = _th.local()
+
+
+def last_info():
+    return getattr(_last, 'info', {}) or {}
+
 
 def find_claude_cli():
     """설치된 Claude Code 실행 파일 경로 (없으면 None)"""
@@ -205,6 +213,9 @@ def call_claude_cli(prompt, stop_flag=None, timeout=None, system_file=None,
         raise AIError(f'Claude Code 실행 실패 (코드 {proc.returncode}): {msg or "출력 없음"}',
                       ''.join(text))
     out = result.get('result') or ''.join(text)
+    u = result.get('usage') or {}
+    _last.info = {'stop': result.get('stop_reason') or result.get('subtype'),
+                  'out_tokens': u.get('output_tokens'), 'chars': len(out)}
     if result.get('is_error') or result.get('subtype') != 'success' or not out.strip():
         hint = ''
         low = out.lower()
@@ -404,3 +415,15 @@ def extract_rules(project, account=1):
             '금지문구': clean(data.get('금지문구')),
             '제목_최대글자': num(data.get('제목_최대글자', 0)),
             '본문_최소글자': num(data.get('본문_최소글자', 0))}
+
+
+def write_missing(project, case_text, missing, existing_titles, stop_flag=None, account=None,
+                  progress=None):
+    """원고가 일부만 왔을 때(예: 7편) 빠진 번호만 이어서 쓴다. 10편을 다시 쓰는 것보다 훨씬 적게 듦."""
+    nums = ', '.join(missing)
+    extra = (f'[이어 쓰기 요청] 위 사건으로 원고를 쓰다가 중간에 끊겼다. 빠진 {nums}번 원고만 써라. '
+             f'출력은 해당 번호 줄(`# 숫자`)로 시작하는 원고들뿐이다.\n'
+             '- 이미 쓴 원고와 제목·구성·질문 각도가 겹치지 않게 한다. 제목 접두어 5:5 등 전체 배분이 맞도록 고른다.\n'
+             '- 이미 쓴 원고 제목: ' + ' | '.join(existing_titles))
+    return generate(project, case_text, stop_flag=stop_flag, account=account, progress=progress,
+                    single=nums, extra=extra)

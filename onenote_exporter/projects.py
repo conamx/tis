@@ -103,10 +103,14 @@ class Project:
                 '근거 없는 사실로 채우지는 않는다.\n')
         else:
             length_rule = ''
-        out_rule = (f'- 이번 응답에는 `# {single}` 원고 1편만 출력한다. 번호 줄은 `# {single}` 한 줄, '
-                    '바로 다음 줄이 제목이다. 앞뒤 인사·설명·검수표는 출력하지 않는다.') if single else (
-                    f'- 응답에는 `# 1`부터 `# {n}`까지의 원고만 출력한다. 각 번호 줄은 `# 숫자` 한 줄만 쓰고, '
-                    '바로 다음 줄이 제목이다. 앞뒤 인사·설명·검수표는 출력하지 않는다.')
+        if single:
+            nums = [x.strip() for x in str(single).split(',') if x.strip()]
+            marks = ', '.join(f'`# {x}`' for x in nums)
+            out_rule = (f'- 이번 응답에는 {marks} 원고{" " + str(len(nums)) + "편" if len(nums) > 1 else " 1편"}만 출력한다. '
+                        '번호 줄은 `# 숫자` 한 줄, 바로 다음 줄이 제목이다. 앞뒤 인사·설명·검수표는 출력하지 않는다.')
+        else:
+            out_rule = (f'- 응답에는 `# 1`부터 `# {n}`까지의 원고만 출력한다. 각 번호 줄은 `# 숫자` 한 줄만 쓰고, '
+                        '바로 다음 줄이 제목이다. 앞뒤 인사·설명·검수표는 출력하지 않는다.')
         parts.append(
             '---\n'
             '[매크로 실행 규칙]\n'

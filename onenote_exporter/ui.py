@@ -131,6 +131,18 @@ def fill_template(tpl, meta=None):
     return '' if missing else out
 
 
+def _write_log_file(msg, level='inf'):
+    """logs/날짜.log 에 한 줄씩 남김 (밤새 돌린 결과를 아침에 확인)"""
+    try:
+        os.makedirs(app_config.LOG_DIR, exist_ok=True)
+        now = datetime.now()
+        mark = {'err': '[오류]', 'warn': '[경고]', 'ok': '[완료]'}.get(level, '')
+        with open(os.path.join(app_config.LOG_DIR, now.strftime('%Y-%m-%d') + '.log'), 'a', encoding='utf-8') as f:
+            f.write(f'{now:%H:%M:%S} {mark} {msg}\n')
+    except Exception:
+        pass
+
+
 LIMIT_GRACE = 60   # 한도 초기화 시각 + 1분 뒤에 다시 시작
 
 
@@ -451,6 +463,7 @@ class OneNoteExporterGUI:
         self.log_txt.insert(tk.END, f"[{ts}] {msg}\n", level)
         self.log_txt.see(tk.END)
         self.log_txt.config(state=tk.DISABLED)
+        _write_log_file(msg, level)
 
 
     def _auto_connect(self):
@@ -818,6 +831,9 @@ class OneNoteExporterGUI:
         tk.Button(run, text='결과 폴더', command=lambda: app_config.open_folder(app_config.OUTPUT_DIR),
                   font=(F, 9), bg=C['light'], fg=C['text'], relief=tk.FLAT, padx=12, pady=6,
                   cursor='hand2').pack(side=tk.LEFT)
+        tk.Button(run, text='기록(로그)', command=lambda: app_config.open_folder(app_config.LOG_DIR),
+                  font=(F, 9), bg=C['light'], fg=C['text'], relief=tk.FLAT, padx=12, pady=6,
+                  cursor='hand2').pack(side=tk.LEFT, padx=(6, 0))
         self.stop_btn = tk.Button(run, text='중지', command=self._stop_generate, font=(F, 10),
                                   bg=C['light'], fg=C['subtext'], relief=tk.FLAT, padx=16,
                                   pady=6, cursor='hand2', state=tk.DISABLED)
@@ -1474,17 +1490,26 @@ class OneNoteExporterGUI:
                     idx, job = q.get_nowait()
                 except queue.Empty:
                     return
-                title, case_text, case = job
+                title, case_text, case = job[:3]
+                saved = job[3] if len(job) > 3 else ''   # 한도로 끊겼을 때 이미 받은 원고
                 tag = f'{who}[{idx}/{total}] {title}'
-                log(f'{tag} — 시작')
+                log(f'{tag} — ' + ('이어서 시작 (받아 둔 원고 있음)' if saved else '시작'))
                 t0 = time.time()
                 self._ui(lambda tag=tag: self._prog_set(key, f'{tag}  ·  시작 중…', 0.0))
                 try:
-                    text = generator.generate(p, case_text, stop_flag=self.gen_stop, account=account,
-                                              progress=progress_fn(key, tag, t0, per))
+                    if saved:
+                        text = saved
+                    else:
+                        text = generator.generate(p, case_text, stop_flag=self.gen_stop, account=account,
+                                                  progress=progress_fn(key, tag, t0, per))
                 except generator.LimitError as e:
                     self._ui(lambda: self._show_acc(account))
-                    q.put((idx, job))   # 이 사례는 다시 대기열로 (다른 계정이 먼저 가져갈 수도 있음)
+                    # 끊기기 전까지 다 쓴 원고는 버리지 않음 (마지막 1편은 쓰다 만 것이라 제외)
+                    done_arts = proj.split_articles(e.partial or '')[:-1]
+                    keep = proj.join_articles(done_arts) if done_arts else ''
+                    if keep:
+                        log(f'{tag} — 한도로 끊김 · 다 쓴 {len(done_arts)}편은 보관, 나머지만 이어서 씁니다', 'warn')
+                    q.put((idx, (title, case_text, case, keep)))   # 다시 대기열로 (다른 계정이 먼저 가져갈 수도 있음)
                     if opts['wait_limit'] and self._wait_limit(key, f'계정{account}', e.resets_at, log):
                         continue
                     log(f'계정{account} — 사용량 한도로 멈춤', 'err')
@@ -1504,6 +1529,33 @@ class OneNoteExporterGUI:
                     if '중지' in str(e) or '로그인' in str(e):
                         return
                     continue
+
+                # 원고가 덜 왔으면(예: 7편) 빠진 번호만 이어서 쓰기
+                for attempt in range(2):
+                    arts_raw = proj.split_articles(text)
+                    have = {n for n, _ in arts_raw}
+                    missing = [str(i) for i in range(1, per + 1) if str(i) not in have]
+                    if not missing or self.gen_stop.is_set():
+                        break
+                    info = generator.last_info()
+                    why = ('사용량 한도로 끊겼던 사례' if (saved and attempt == 0) else
+                           f'종료: {info.get("stop", "?")}, 출력 {info.get("out_tokens") or "?"}토큰')
+                    log(f'{tag} — {len(arts_raw)}편만 받음 ({why}) → {", ".join(missing)}번만 이어서 씁니다', 'warn')
+                    try:
+                        more = generator.write_missing(
+                            p, case_text, missing, [b.strip().split('\n')[0] for _, b in arts_raw],
+                            stop_flag=self.gen_stop, account=account,
+                            progress=progress_fn(key, f'{tag} 이어 쓰기', time.time(), len(missing)))
+                    except generator.LimitError as e:
+                        if opts['wait_limit'] and self._wait_limit(key, f'계정{account}', e.resets_at, log):
+                            continue
+                        break
+                    except Exception as e:
+                        log(f'{tag} — 이어 쓰기 실패: {e}', 'err')
+                        break
+                    add = [(n, b) for n, b in proj.split_articles(more) if n in missing]
+                    merged = dict(arts_raw); merged.update(add)
+                    text = proj.join_articles(sorted(merged.items(), key=lambda x: int(x[0])))
 
                 case_id = case.case_id if case else ''
                 issues = proj.check_output(text, p, case_id)
