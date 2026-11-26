@@ -1699,91 +1699,161 @@ class OneNoteExporterGUI:
         return (pre + ' ' if pre else '') + art.get('title', '')
 
     def _link_dialog(self):
-        sel = [i for i, v in enumerate(self.check_vars) if v.get()]
-        idxs = sel or list(range(len(self.articles)))
-        if not idxs:
-            messagebox.showwarning('링크 기록', '글 목록이 비어 있습니다.'); return
+        """OneNote 섹션의 페이지를 직접 읽어서 링크 기록 — 매크로를 껐다 켜도, 예전 페이지도 언제든 가능"""
+        if not self.is_connected:
+            messagebox.showwarning('링크 기록', 'OneNote가 연결되어 있어야 합니다.'); return
         w = tk.Toplevel(self.root)
         w.title('로톡 링크 기록')
-        w.geometry('900x560')
+        w.geometry('960x640')
         w.configure(bg=C['bg'])
         w.transient(self.root)
-        card = self._card(w, '로톡에 올린 글 주소를 붙여넣으세요 — 엑셀(업로드기록.xlsx)과 OneNote 페이지에 함께 기록')
-        card.pack_configure(fill=tk.BOTH, expand=True)
-        hdr = tk.Frame(card, bg=C['white']); hdr.pack(fill=tk.X, padx=12, pady=(6, 2))
-        for t, wd in (('사건번호', 14), ('제목', 46), ('로톡 링크', 30)):
-            tk.Label(hdr, text=t, font=(F, 9, 'bold'), bg=C['white'], fg=C['subtext'], width=wd,
-                     anchor='w').pack(side=tk.LEFT)
-        wrap = tk.Frame(card, bg=C['white']); wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+        top = self._card(w, '로톡에 올린 글 주소를 붙여넣으세요 — 엑셀(업로드기록.xlsx)과 OneNote 페이지에 함께 기록')
+        bar = tk.Frame(top, bg=C['white']); bar.pack(fill=tk.X, padx=12, pady=8)
+        tk.Label(bar, text='섹션', font=(F, 9), bg=C['white'], fg=C['subtext']).pack(side=tk.LEFT)
+        sec_var = tk.StringVar(value=self.section_var.get() if self.section_var.get() in self._section_map
+                               else (next(iter(self._section_map), '')))
+        sec_dd = self._dropdown(bar, width=30, var=sec_var, command=lambda: load())
+        sec_dd.set_values(list(self._section_map.keys()))
+        sec_var.set(sec_var.get())
+        sec_dd.pack(side=tk.LEFT, padx=(6, 12))
+        tk.Label(bar, text='찾기', font=(F, 9), bg=C['white'], fg=C['subtext']).pack(side=tk.LEFT)
+        q_var = tk.StringVar()
+        qe = tk.Entry(bar, textvariable=q_var, font=(F, 9), width=18, relief=tk.FLAT, bg=C['bg'])
+        qe.pack(side=tk.LEFT, padx=6, ipady=3)
+        only_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(bar, text='링크 없는 페이지만', variable=only_var, command=lambda: show(),
+                       font=(F, 9), bg=C['white'], activebackground=C['white'], selectcolor=C['white']
+                       ).pack(side=tk.LEFT, padx=8)
+        self._small_btn(bar, '↻ 다시 불러오기', lambda: load()).pack(side=tk.RIGHT)
+
+        lc = tk.Frame(w, bg=C['white'], highlightbackground=C['light'], highlightthickness=1)
+        lc.pack(fill=tk.BOTH, expand=True, padx=12, pady=(8, 0))
+        hdr = tk.Frame(lc, bg=C['bg']); hdr.pack(fill=tk.X, padx=1, pady=1)
+        for t, wd in (('사건번호', 14), ('OneNote 페이지 제목', 50), ('로톡 링크', 32)):
+            tk.Label(hdr, text=t, font=(F, 9, 'bold'), bg=C['bg'], fg=C['subtext'], width=wd,
+                     anchor='w').pack(side=tk.LEFT, padx=(8, 0), pady=5)
+        wrap = tk.Frame(lc, bg=C['white']); wrap.pack(fill=tk.BOTH, expand=True)
         sb = tk.Scrollbar(wrap); sb.pack(side=tk.RIGHT, fill=tk.Y)
         cv = tk.Canvas(wrap, bg=C['white'], highlightthickness=0, yscrollcommand=sb.set)
         cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True); sb.config(command=cv.yview)
         inner = tk.Frame(cv, bg=C['white'])
         cv.create_window((0, 0), window=inner, anchor='nw')
         inner.bind('<Configure>', lambda e: cv.config(scrollregion=cv.bbox('all')))
-        rows = []
-        for i in idxs:
-            a = self.articles[i]
-            r = tk.Frame(inner, bg=C['white']); r.pack(fill=tk.X, pady=2)
-            case_no = (a.get('meta') or {}).get('사건번호', '')
-            tk.Label(r, text=case_no or '-', font=(F, 9), bg=C['white'], width=14, anchor='w').pack(side=tk.LEFT)
-            title = self._full_title(a)
-            tk.Label(r, text=title[:44] + ('…' if len(title) > 44 else ''), font=(F, 9), bg=C['white'],
-                     width=46, anchor='w').pack(side=tk.LEFT)
-            e = tk.Entry(r, font=(F, 9), width=30, relief=tk.FLAT, bg=C['bg'])
-            e.insert(0, a.get('lawtalk_url', ''))
-            e.pack(side=tk.LEFT, ipady=3)
-            def paste(e=e):
-                try:
-                    e.delete(0, tk.END); e.insert(0, w.clipboard_get().strip())
-                except Exception:
-                    pass
-            tk.Button(r, text='붙여넣기', command=paste, font=(F, 8), bg=C['light'], relief=tk.FLAT,
-                      padx=6, cursor='hand2').pack(side=tk.LEFT, padx=4)
-            rows.append((i, a, case_no, title, e))
+        wheel = lambda e: cv.yview_scroll(-1 * (e.delta // 120), 'units')
+        cv.bind('<Enter>', lambda e: cv.bind_all('<MouseWheel>', wheel))
+        cv.bind('<Leave>', lambda e: cv.unbind_all('<MouseWheel>'))
         status = tk.Label(w, text='', font=(F, 9), bg=C['bg'], fg=C['subtext'])
+        st = {'pages': [], 'typed': {}}   # typed: 페이지ID → 입력한 링크 (필터 바뀌어도 유지)
+        rows = []
+
+        def remember():
+            for pg, e in rows:
+                if e.winfo_exists() and e.cget('state') != 'disabled':
+                    st['typed'][pg['id']] = e.get().strip()
+
+        def show():
+            remember()
+            for c in inner.winfo_children():
+                c.destroy()
+            rows.clear()
+            q = q_var.get().strip()
+            n = 0
+            for pg in st['pages']:
+                if not pg['title'] or set(pg['title']) <= set('ㅡ-─ '):
+                    continue   # 구분선 페이지
+                if only_var.get() and pg['link']:
+                    continue
+                if q and q not in pg['title'] and q not in pg['case_no']:
+                    continue
+                r = tk.Frame(inner, bg=C['white']); r.pack(fill=tk.X, pady=2)
+                tk.Label(r, text=pg['case_no'] or '-', font=(F, 9), bg=C['white'], width=14,
+                         anchor='w').pack(side=tk.LEFT, padx=(8, 0))
+                t = pg['title']
+                tk.Label(r, text=t[:48] + ('…' if len(t) > 48 else ''), font=(F, 9), bg=C['white'],
+                         width=50, anchor='w').pack(side=tk.LEFT, padx=(8, 0))
+                e = tk.Entry(r, font=(F, 9), width=32, relief=tk.FLAT, bg=C['bg'])
+                e.pack(side=tk.LEFT, ipady=3, padx=(8, 0))
+                if pg['link']:
+                    e.insert(0, pg['link']); e.config(state='disabled', disabledbackground=C['white'])
+                else:
+                    e.insert(0, st['typed'].get(pg['id'], ''))
+                    def paste(e=e):
+                        try:
+                            e.delete(0, tk.END); e.insert(0, w.clipboard_get().strip())
+                        except Exception:
+                            pass
+                    tk.Button(r, text='붙여넣기', command=paste, font=(F, 8), bg=C['light'],
+                              relief=tk.FLAT, padx=6, cursor='hand2').pack(side=tk.LEFT, padx=4)
+                rows.append((pg, e))
+                n += 1
+            cv.yview_moveto(0)
+            done = sum(1 for p_ in st['pages'] if p_['link'])
+            status.config(text=f'페이지 {len(st["pages"])}개 · 링크 기록됨 {done}개 · 표시 {n}개', fg=C['subtext'])
+
+        q_var.trace_add('write', lambda *a: show())
+
+        def load():
+            name = sec_var.get()
+            sec = self._section_map.get(name)
+            if not sec:
+                status.config(text='섹션을 고르세요.'); return
+            remember()
+            status.config(text='OneNote에서 페이지 읽는 중… (페이지가 많으면 수십 초)', fg=C['orange'])
+            def work():
+                try:
+                    pages = self.onenote.list_pages(sec.id)
+                except Exception as ex:
+                    msg = str(ex)
+                    self._ui(lambda: status.winfo_exists() and status.config(text=f'불러오기 실패: {msg[:80]}', fg=C['red']))
+                    return
+                def done():
+                    if w.winfo_exists():
+                        st['pages'] = pages; show()
+                self._ui(done)
+            threading.Thread(target=work, daemon=True).start()
 
         def save():
+            remember()
             items = []
-            for i, a, case_no, title, e in rows:
-                url = e.get().strip()
-                if url and url != a.get('lawtalk_url', ''):
+            for pg in st['pages']:
+                url = st['typed'].get(pg['id'], '')
+                if url and not pg['link']:
                     if not re.match(r'^https?://', url):
                         messagebox.showwarning('링크 기록', f'주소 형식이 아닙니다:\n{url}', parent=w); return
-                    items.append((a, case_no, title, url))
+                    items.append((pg, url))
             if not items:
-                status.config(text='새로 넣은 링크가 없습니다.'); return
+                status.config(text='새로 넣은 링크가 없습니다.', fg=C['subtext']); return
             try:
                 n = excel_source.record_upload(app_config.UPLOAD_XLSX, [
-                    {'지침': (a.get('gen') or {}).get('project', ''), '사건번호': c, '링크': u, '제목': t}
-                    for a, c, t, u in items])
+                    {'섹션': sec_var.get(), '사건번호': pg['case_no'], '링크': u, '제목': pg['title']}
+                    for pg, u in items])
             except PermissionError:
                 messagebox.showerror('링크 기록', '업로드기록.xlsx 가 엑셀에서 열려 있어 저장하지 못했습니다.\n닫고 다시 저장하세요.', parent=w)
                 return
             except Exception as ex:
                 messagebox.showerror('링크 기록', f'엑셀 저장 실패: {ex}', parent=w); return
-            for a, c, t, u in items:
-                a['lawtalk_url'] = u
-            self._log(f'링크 기록: 엑셀 {n}건 추가', 'ok')
-            status.config(text=f'엑셀에 {n}건 기록했습니다. OneNote 페이지에 넣는 중…', fg=C['green'])
-            targets = [(a, u) for a, c, t, u in items if a.get('page_id')]
+            status.config(text=f'엑셀에 {n}건 기록. OneNote 페이지에 넣는 중…', fg=C['orange'])
             def work():
-                ok = sum(1 for a, u in targets if self.is_connected and self.onenote.add_link(a['page_id'], u))
-                miss = len(items) - len(targets)
+                ok = 0
+                for pg, u in items:
+                    if self.onenote.add_link(pg['id'], u):
+                        pg['link'] = u; ok += 1
+                        st['typed'].pop(pg['id'], None)
                 msg = f'엑셀 {n}건 · OneNote {ok}건 기록 완료'
-                if miss:
-                    msg += f' (OneNote 페이지 정보가 없는 {miss}건은 엑셀에만 기록)'
-                self._ui(lambda: (status.winfo_exists() and status.config(text=msg, fg=C['green']),
-                                  self._rebuild_checks(), self._log(msg, 'ok')))
+                if ok < len(items):
+                    msg += f' ({len(items) - ok}건은 OneNote에 못 넣음 — 페이지가 지워졌는지 확인)'
+                self._ui(lambda: (w.winfo_exists() and (show(), status.config(text=msg, fg=C['green'])),
+                                  self._log(msg, 'ok')))
             threading.Thread(target=work, daemon=True).start()
 
-        bf = tk.Frame(w, bg=C['bg']); bf.pack(fill=tk.X, padx=12, pady=10, side=tk.BOTTOM)
+        bf = tk.Frame(w, bg=C['bg']); bf.pack(fill=tk.X, padx=12, pady=10, side=tk.BOTTOM, before=lc)
         _btn(bf, '저장', save, bg=C['accent'], fs=10, px=24, py=6).pack(side=tk.RIGHT)
         tk.Button(bf, text='기록 엑셀 열기',
                   command=lambda: app_config.open_file(app_config.UPLOAD_XLSX) or
                   status.config(text='아직 기록이 없습니다.', fg=C['subtext']),
                   font=(F, 9), bg=C['light'], relief=tk.FLAT, padx=12, pady=5, cursor='hand2').pack(side=tk.RIGHT, padx=6)
-        status.pack(side=tk.BOTTOM, anchor='w', padx=14)
+        status.pack(side=tk.BOTTOM, anchor='w', padx=14, before=lc)
+        load()
 
     # ── 1편 다시 쓰기 (메인 화면 글 목록) ──
 

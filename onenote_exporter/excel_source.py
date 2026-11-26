@@ -127,7 +127,7 @@ def record_usage(project_name, case):
 
 # ── 로톡 업로드 기록 (새 엑셀, 사례 엑셀 원본은 건드리지 않음) ─────────────
 
-UPLOAD_HEADER = ['날짜', '지침', '사건번호', '링크', '제목']
+UPLOAD_HEADER = ['날짜', '섹션', '사건번호', '링크', '제목']
 
 
 def record_upload(path, rows):
@@ -153,7 +153,7 @@ def record_upload(path, rows):
         url = (r.get('링크') or '').strip()
         if not url or url in have:
             continue
-        ws.append([datetime.now().strftime('%Y-%m-%d %H:%M'), r.get('지침', ''), r.get('사건번호', ''),
+        ws.append([datetime.now().strftime('%Y-%m-%d %H:%M'), r.get('섹션', ''), r.get('사건번호', ''),
                    url, r.get('제목', '')])
         cell = ws.cell(row=ws.max_row, column=4)
         cell.hyperlink = url

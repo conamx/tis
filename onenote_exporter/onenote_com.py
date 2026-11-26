@@ -164,6 +164,50 @@ QUICKSTYLE_PS = (
 )
 
 
+# 섹션의 페이지마다: ID, 제목, 만든 시각, 본문 텍스트 앞부분(사건번호·로톡 링크 찾기용)을 JSON으로 저장
+PAGES_PS = (
+    "$ErrorActionPreference='Stop'\n"
+    "$sid=[System.IO.File]::ReadAllText(__SID__,[System.Text.Encoding]::UTF8).Trim()\n"
+    "$on=New-Object -ComObject OneNote.Application\n"
+    "[string]$h=''\n"
+    "$on.GetHierarchy($sid,4,[ref]$h)\n"
+    "$hd=[xml]$h\n"
+    "$m=New-Object System.Xml.XmlNamespaceManager($hd.NameTable)\n"
+    "$m.AddNamespace('one',$hd.DocumentElement.NamespaceURI)\n"
+    "$rows=@()\n"
+    "foreach($pg in $hd.SelectNodes('//one:Page',$m)){\n"
+    "  [string]$x=''\n"
+    "  try{ $on.GetPageContent($pg.GetAttribute('ID'),[ref]$x,0) }catch{ continue }\n"
+    "  $d=[xml]$x\n"
+    "  $m2=New-Object System.Xml.XmlNamespaceManager($d.NameTable)\n"
+    "  $m2.AddNamespace('one',$d.DocumentElement.NamespaceURI)\n"
+    "  $ts=@($d.SelectNodes('//one:Outline//one:T',$m2) | Select-Object -First 6 | ForEach-Object { $_.InnerText })\n"
+    "  $rows+=[pscustomobject]@{id=$pg.GetAttribute('ID');title=$pg.GetAttribute('name');"
+    "time=$pg.GetAttribute('dateTime');head=($ts -join \"`n\")}\n"
+    "}\n"
+    "$json=ConvertTo-Json -InputObject @($rows) -Depth 3\n"
+    "[System.IO.File]::WriteAllText(__OUT__,$json,[System.Text.Encoding]::UTF8)\n"
+)
+
+
+def parse_page_rows(data):
+    """PAGES_PS 결과 → 사건번호·로톡 링크를 뽑아 정리 (최근 페이지 먼저)"""
+    rows = []
+    for r in data or []:
+        head = r.get('head') or ''
+        text = re.sub(r'<[^>]+>', ' ', head)
+        cm = re.search(r'사건번호\s*[:：]\s*([0-9]{2,4}\s*[가-힣]{1,4}\s*[0-9]{1,7}(?:호)?)', text)
+        lm = re.search(r'href=["\']([^"\']+)["\']', head) if '로톡 링크' in head else None
+        if not lm and '로톡 링크' in text:
+            lm = re.search(r'로톡 링크\s*[:：]\s*(https?://\S+)', text)
+        rows.append({'id': r.get('id', ''), 'title': (r.get('title') or '').strip(),
+                     'time': r.get('time') or '',
+                     'case_no': cm.group(1).replace(' ', '') if cm else '',
+                     'link': lm.group(1) if lm else ''})
+    rows.sort(key=lambda x: x['time'], reverse=True)
+    return rows
+
+
 class SectionInfo:
     def __init__(self, sid, name, notebook):
         self.id = sid; self.name = name; self.notebook = notebook
@@ -503,6 +547,28 @@ class OneNoteManager:
             self._run_ps_file(ps1, timeout=300)
             if os.path.exists(pf):
                 self.last_page_id = Path(pf).read_text(encoding='utf-8-sig').strip()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def list_pages(self, section_id):
+        """섹션의 페이지 목록 + 각 페이지의 사건번호·로톡 링크를 OneNote에서 직접 읽는다.
+        매크로를 껐다 켜도, 예전에 만든 페이지여도 언제든 쓸 수 있게 하기 위함.
+        반환: [{'id','title','time','case_no','link'}] (최근 페이지가 먼저)"""
+        if not section_id:
+            section_id = self.section_id or self.get_first_section_id()
+        tmp = tempfile.mkdtemp(prefix='on_pages_')
+        try:
+            sf = os.path.join(tmp, 'sid.txt'); of = os.path.join(tmp, 'out.json'); ps1 = os.path.join(tmp, 'l.ps1')
+            Path(sf).write_text(section_id, encoding='utf-8')
+            Path(ps1).write_text(PAGES_PS.replace('__SID__', self._q(sf)).replace('__OUT__', self._q(of)),
+                                 encoding='utf-8-sig')
+            self._run_ps_file(ps1, timeout=_DEFAULT_TIMEOUT)
+            import json
+            raw = Path(of).read_text(encoding='utf-8-sig').strip()
+            data = json.loads(raw) if raw else []
+            if isinstance(data, dict):
+                data = [data]
+            return parse_page_rows(data)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
