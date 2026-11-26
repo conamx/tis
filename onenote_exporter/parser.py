@@ -658,6 +658,8 @@ def _extract_numeric_delimiter_sections(content):
 #   - 표는 있을 수도 없을 수도 있음 (없어도, 형식이 약간 깨져 있어도 오류 없이 처리)
 #   - 줄 단위 블록(blocks)으로 분해해 두고, OneNote 쪽에서 서식(볼드/크기/색/표)을 입힌다
 # ──────────────────────────────────────────────────────────────
+# 'Q. 질문', '**Q1. 질문?**', 'Q: 질문' 같은 Q&A 질문 줄 (Q&A 라는 소제목은 해당 안 됨)
+_Q_LINE_RE      = re.compile(r'^(?:\*\*)?\s*(Q\s*\d*\s*[.:)．]\s*.+?)(?:\*\*)?\s*$')
 _MD_MARKER_RE   = re.compile(r'(?m)^#[ \t]+(\d+)[ \t]*$')
 _TABLE_SEP_CELL = re.compile(r'^:?-{1,}:?$')
 _HR_RE          = re.compile(r'^(?:-{3,}|\*{3,}|_{3,})$')
@@ -750,6 +752,10 @@ def _parse_md_blocks(body):
                     blocks.append({'type': 'quote', 'text': t})
                 j += 1
             i = j; continue
+        qm = _Q_LINE_RE.match(s)                 # Q. 질문 → 로톡 소제목
+        if qm and len(s) <= 160:
+            blocks.append({'type': 'heading', 'level': 3, 'text': qm.group(1).replace('**', '').strip()})
+            i += 1; continue
         m = re.match(r'^[-*•·]\s+(.+)$', s)      # - 목록
         if m:
             blocks.append({'type': 'bullet', 'text': m.group(1).strip()})
